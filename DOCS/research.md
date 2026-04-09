@@ -7,6 +7,12 @@
 - 외부 자료 조사: MediaPipe Pose Landmarker, ROS2 QoS, OPA(Policy-as-Code), NHTSA 자동화 안전 개요
 
 ---
+## 0) 사용자 지시 사항
+- Hands on은 사용하지 않는다
+- 현재 차에는 실제 브레이크가 달려있지 않음.
+- LKAS 제어 방식: LKAS control값 -> shared memory -> DCAS -> DCAS control값 -> shared memory -> Vegicle-jetracer
+- LKAS에서 Curvature, throttle, steer 값 제공하면, 받아와서 정책 판단 시 고려.
+---
 
 ## 1) 프로젝트의 본질: “차량 한계”가 아니라 “운전자 한계”를 다루는 DCAS
 
@@ -42,7 +48,50 @@
 
 하는 end-to-end 통합 능력에 있다.
 
+### 1.3 아키텍처
+[ PC (Router) ] [ KMU (Server) ]
++-------------------------+ +------------------+
+| | --- API ---> | |
+| - Monitoring Camera | | VLM |
+| - Media Pipe | <-- JSON --- | |
+| - Dashboard | | |
++-------------------------+ +------------------+
+| ^
+VLM | | System
+response | | Data
+v |
+[ MQTT or ROS2 ]
+| ^
+| |
+v |
+[ Jetson Orin Nano ] [ VCP-G ]
++-------------------------+ +------------------+
+| | | |
+| - DCAS | <--- CAN ---> | - Safety App |
+| - LKAS | | (Watch, RMF) |
+| - Vehicle Control | | |
++-------------------------+ +------------------+
+
+< Pi Racer >
 ---
+
+아키텍처 해석 기준:
+
+- **PC(Router)**: 카메라 수집, MediaPipe/VLM 호출, 대시보드/모니터링 UI 담당
+- **KMU(Server)**: VLM 추론 서버/API 제공
+- **Jetson Orin Nano**: DCAS + LKAS + Vehicle Control의 실행 위치
+   - 즉, LKAS는 PC가 아니라 Jetson 쪽 제어 스택 내부에 위치한다.
+   - DCAS는 Jetson에서 LKAS 출력과 인지 입력을 함께 받아 정책 판단을 수행한다.
+- **VCP-G**: 안전 앱/워치/RMF 계층으로, Jetson과 CAN으로 연동되는 보조 안전 계층
+- **Pi Racer**: 실제 차량 플랫폼/실행 대상
+
+데이터 흐름 요약:
+
+1. PC에서 인지/대시보드 관련 입력을 생성한다.
+2. MQTT 또는 ROS2를 통해 Jetson Orin Nano로 상태/인지 데이터를 전달한다.
+3. Jetson 내부에서 LKAS가 제어값을 만들고, DCAS가 이를 읽어 제한/조정한다.
+4. 최종 제어값은 Vehicle Control을 통해 Pi Racer에 반영된다.
+5. 필요 시 VCP-G 안전 앱이 CAN 경로로 추가 보호를 제공한다.
 
 ## 2) 현재 ads-skynet 생태계 기준 기술 현황
 
@@ -92,6 +141,12 @@
 - `DCAS-PolicyEngine`은 현재 README만 존재
 - 즉, 아키텍처/정책/인터페이스를 처음부터 정의할 수 있는 타이밍
 - 동시에 팀장의 설계 품질이 곧 레포 품질이 되는 상태
+
+### 2.3 현재 상태의 의미: 새 레포이므로 언어/툴체인 선택 자유도가 높다
+
+- 이 레포에는 아직 Python 전용 툴체인(`pytest`, `black`, `mypy` 등)이나 CI 워크플로우가 구축되어 있지 않다.
+- 따라서 `DCAS-PolicyEngine`은 LKAS 하위모듈의 기술 선택을 그대로 따라야 하는 상태가 아니라, 요구사항에 맞춰 언어/빌드/테스트 스택을 새로 정할 수 있다.
+- 즉, C++로 바로 시작해도 구조적으로 무리가 없고, 반대로 Python으로 먼저 검증한 뒤 C++ 포팅 전략을 택해도 된다.
 
 ---
 
@@ -199,6 +254,20 @@
 
 - GUI/Web-viewer로 상태, 이유, 카운트다운, 권고 메시지 전송
 - 이벤트 로깅(사후 분석/발표 자료)
+
+### 5.3 왜 ZMQ가 지금 스택에 잘 맞는가
+
+- ZeroMQ는 brokerless 비동기 메시징 라이브러리로, 코드와 배포 복잡도를 낮춘다.
+- `PUB/SUB`, `REQ/REP`, `PUSH/PULL` 등 일반적인 메시징 패턴을 지원해 노트북-젯슨-대시보드 분리에 적합하다.
+- `libzmq` 자체가 C++로 구현되어 있고, C++/Python 등 다수 언어 바인딩이 제공되므로 C++ 정책 엔진과도 자연스럽게 연결된다.
+- 현재 생태계에서도 `common/src/communication/zmq_broadcast.py`, `Web-viewer/src/run.py`, `Vehicle-jetracer/src/vehicle.py`가 이미 ZMQ 기반 경로를 사용하므로, 정책 엔진만 바꿔도 통신계약을 유지하기 쉽다.
+
+### 5.4 C++ 개발을 선택할 때의 현실적 기준
+
+- C++를 선택하는 핵심 이유는 “산업에서 멋있어 보여서”가 아니라, 실시간성/성능/메모리 제어/포팅 가능성을 동시에 만족시키기 위해서다.
+- 현재 과제는 상태머신, 메시지 계약, 제한 로직이 핵심이므로 C++로도 자연스럽게 구현 가능하다.
+- 다만 C++로 간다면 빌드 시스템, 포맷터, 정적분석, 단위테스트를 별도로 세팅해야 하므로 초기 세팅 비용은 더 크다.
+- 결론적으로 C++는 충분히 타당하지만, 팀 일정과 검증 속도까지 함께 고려해서 선택해야 한다.
 
 ## 5.2 호스트 분담(현 문서 방향 유지 + 보완)
 
