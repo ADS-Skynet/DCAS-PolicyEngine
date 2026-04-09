@@ -7,6 +7,10 @@
 
 ## 0. 전제 및 고정 조건
 
+- 최우선 목표:
+  - **5월 첫째 주까지 4가지 맥락(기본/졸음/폰/의식 없음)에서 전체 시스템 End-to-End 동작 달성**
+  - 범위: 인지 입력 수신 → DCAS 정책 판단 → 제어값 제한 반영 → 차량 actuation → 대시보드 표시
+
 - 구현 언어: **C++ 우선**
 - 통신: **ZMQ 우선** (기존 ads-skynet 포트/패턴 정합)
 - 역할 분리:
@@ -103,6 +107,32 @@
 
 - 정책엔진이 `dcas.state.v1`를 ZMQ publish
 - `Web-viewer`가 수신 후 WebSocket으로 브라우저 전달
+
+### 2.6 Fast loop / Slow loop 정책 우선순위
+
+- Fast loop (MediaPipe 기반 1차 인지):
+  - `eyes_on`, `driver_present` 변화는 저지연으로 즉시 정책 반영
+  - 경고/제한의 1차 트리거는 Fast loop 신호를 기준으로 판단
+- Slow loop (VLM 맥락 추론):
+  - 비동기 후행 입력으로 취급
+  - 상태를 뒤집기보다 대응 강도/메시지 personalization을 보강
+
+우선순위 규칙:
+
+- 상태 우선순위: `ABSENT > UNRESPONSIVE > WARNING > OK`
+- VLM은 우선순위 높은 상태를 완화하지 못한다(안전 우선)
+- `UNRESPONSIVE/ABSENT` 구간에서는 맥락(reason)에 따른 구체 대응을 강화
+- `WARNING` 구간에서는 기본 Eyes-on 경고를 유지하고, reason은 경고 표현만 보강
+
+stale/지연 처리 규칙:
+
+- `vlm.latency_ms`가 임계값 초과 또는 `parse_ok=false`면 VLM 결과를 무시하고 기본 안전 정책 유지
+- 최신 VLM 결과가 없더라도 Fast loop만으로 상태 전이/제한이 동작해야 함
+
+히스테리시스 규칙:
+
+- 상태 상승은 빠르게, 복귀는 느리게 적용
+- 단일 프레임 복귀 신호로 `UNRESPONSIVE -> WARNING` 또는 `WARNING -> OK` 즉시 복귀 금지
 
 ---
 
@@ -379,28 +409,49 @@ if limit.emergency:
 - TTL 만료 시 제한 무효 처리
 - curvature/throttle/steer 입력에 따라 제한값이 더 보수적으로 바뀌는지 확인
 
+## 8.4 목표 맥락별 E2E 동작 테스트 (5월 첫째 주 목표)
+
+- 맥락 1: `기본(정상)`
+  - 기대: 상태 `OK`, 과제한 없음, 정상 주행 유지
+- 맥락 2: `졸음(drowsy)`
+  - 기대: 경고 상승 + 보수적 throttle/steer 제한 적용
+- 맥락 3: `폰(phone)`
+  - 기대: 경고 강화 + 제한 단계 진입
+- 맥락 4: `의식 없음(unresponsive/absent)`
+  - 기대: emergency 경로 진입, throttle 0 중심 안전 동작
+
+공통 완료 기준:
+
+- 각 맥락에서 입력 → 상태전이 → 제한 적용 → 대시보드 출력이 한 사이클 이상 일관되게 재현
+- 동일 입력 재생 시 동일 전이/출력 결과가 반복 재현
+
 ---
 
-## 9. 단계별 실행 로드맵 (구현 착수 전 기준)
+## 9. 단계별 실행 로드맵 (5월 첫째 주 목표 정렬)
 
-### Phase 1: 계약/문서 고정 (1주)
+### Phase 1 (이번 주): 계약/상태전이 고정
 
-- `interface-spec-v1.md`, `state-machine-v1.md` 확정
-- 포트/토픽/메시지 버전 동결
+- `interface-spec-v1.md` 확정 (`dms.input.v1`, `lkas.control.v1`, `dcas.state.v1`, SHM 채널 정의)
+- `state-machine-v1.md` 확정 (기본/졸음/폰/의식 없음 4맥락 전이표)
+- 임계값/히스테리시스 초안 확정
 
-### Phase 2: 엔진 골격 구현 계획 확정 (2~3주)
+### Phase 2 (다음 주): E2E 파이프라인 연결
 
-- CMake/디렉토리 구조/테스트 전략 확정
-- 인지팀/LKAS팀과 인터페이스 리허설
+- LKAS output SHM 읽기 + DCAS output SHM 쓰기 파이프라인 연결
+- `curvature/throttle/steer` 반영 정책 매핑 초기 버전 적용
+- 대시보드 출력 필드(`driver_state`, `dcas_state`, `reason_codes`) 연결
 
-### Phase 3: 통합 계획 확정 (3~5주)
+### Phase 3 (5월 첫째 주 직전): 4맥락 안정화
 
-- LKAS limit-layer 개입 지점 확정
-- 대시보드 송신 필드 최종 확정
+- `기본(정상)` 시나리오 안정화
+- `졸음`, `폰` 시나리오에서 단계 상승/제한 동작 튜닝
+- `의식 없음` 시나리오에서 emergency 경로(throttle 0 중심) 안정화
 
-### Phase 4: 검증 시나리오 확정 (5~7주)
+### Phase 4 (5월 첫째 주): 목표 검증 및 데모 고정
 
-- 데모 시나리오(away/drowsy/phone)별 기대 전이/행동 표준화
+- 4가지 맥락 End-to-End 연속 데모 리허설
+- 재현성/KPI 최소 기준 통과 확인
+- Go/No-Go 체크리스트 최종 판정
 
 ---
 
@@ -412,6 +463,86 @@ if limit.emergency:
 - 로깅 표준(전이 원인, confidence, timer snapshot)
 - fail-open/fail-safe 정책(입력 단절 시 보수 모드)
 - 브레이크 미장착 제약에 따른 대체 안전 전략 문서화
+
+---
+
+## 11. 사전 조사 기반 Go/No-Go 체크리스트
+
+아래 항목은 구현 착수 전 “결정 완료” 여부를 판정하는 체크리스트다.
+
+### 11.1 대응 시나리오 다각화 (인간공학 + 주행상태)
+
+- 완료 기준:
+  - 최소 시나리오 집합(`기본`, `drowsy`, `phone`, `의식 없음`)에 대해
+  - 주행 상태(`저속/고속`, `직선/곡선`)별 대응 차등 규칙 정의
+  - HMI 메시지/경고 강도의 인간공학 근거(반응시간/인지부하) 명시
+- 증빙 산출물:
+  - `DOCS/state-machine-v1.md` 내 시나리오별 상태 전이표
+  - `DOCS/interface-spec-v1.md` 내 HMI reason code 정의
+
+### 11.2 매핑 테이블 구성 (`state × reason × context -> action`)
+
+- 완료 기준:
+  - `DriverState`, `reason`, `vehicle_speed`, `curvature`를 입력으로 하는 정책 매핑표 완성
+  - 충돌 규칙(복수 reason 동시 발생 시 우선순위) 정의
+- 증빙 산출물:
+  - `DOCS/state-machine-v1.md` 정책 매핑 표
+  - `src/policy/rules.*` 설계 초안(코드 구현 전 인터페이스 수준)
+
+### 11.3 통신 스키마 설계
+
+- 완료 기준:
+  - `dms.input.v1`, `lkas.control.v1`, `dcas.state.v1`, `lkas.limit.v1` 필수/선택 필드 확정
+  - 버전 규칙(호환/비호환 변경 기준) 확정
+- 증빙 산출물:
+  - `DOCS/interface-spec-v1.md`
+  - JSON 예시와 필드 타입 표
+
+### 11.4 임계값/히스테리시스 근거 확정
+
+- 완료 기준:
+  - `T_warn`, `T_response`, 복귀 지연 시간 등 핵심 threshold 확정
+  - 임계값 선정 근거(문헌/실험/데모 제약) 기록
+- 증빙 산출물:
+  - `DOCS/state-machine-v1.md` 임계값 표 + 근거 섹션
+
+### 11.5 안전/대체 전략 확정 (브레이크 미장착 조건)
+
+- 완료 기준:
+  - emergency 시 대체 동작(`throttle=0`, `steer_limit 강화`, HMI 강화 경고) 확정
+  - fail-open/fail-safe 정책(입력 단절/지연 시 동작) 확정
+- 증빙 산출물:
+  - `DOCS/state-machine-v1.md`의 emergency/fallback 규칙
+
+### 11.6 검증 프로토콜/KPI 확정
+
+- 완료 기준:
+  - 유닛/통합/HIL 테스트 항목과 pass 기준 수치 정의
+  - KPI(`경고 발동 시간`, `false escalation`, `상태 전이 재현율`) 목표값 정의
+- 증빙 산출물:
+  - `DOCS/plan.md` 8장 테스트 계획 + KPI 부록
+
+### 11.7 데이터 품질/불확실성 처리
+
+- 완료 기준:
+  - VLM stale/parse fail/low confidence 처리 규칙 확정
+  - 센서 누락/지연 시 보수 모드 전환 조건 확정
+- 증빙 산출물:
+  - `DOCS/interface-spec-v1.md`의 invalid/stale 처리 정책
+
+### 11.8 팀 경계 및 변경 절차 확정
+
+- 완료 기준:
+  - 인지팀/정책팀/HMI팀 I/O 경계와 소유권 확정
+  - 스키마 변경 절차(제안→리뷰→버전업→배포) 정의
+- 증빙 산출물:
+  - `DOCS/research.md` 역할 분담 섹션
+  - `DOCS/interface-spec-v1.md` 변경 이력 규칙
+
+### 11.9 최종 Go/No-Go 판정 규칙
+
+- **Go**: 11.1~11.8 항목이 모두 완료되고, 증빙 문서가 저장소에 반영된 상태
+- **No-Go**: 핵심 계약(스키마/상태전이/안전전략) 중 1개라도 미확정인 상태
 
 ---
 

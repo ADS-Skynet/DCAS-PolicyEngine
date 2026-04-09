@@ -12,6 +12,7 @@
 - 현재 차에는 실제 브레이크가 달려있지 않음.
 - LKAS 제어 방식: LKAS control값 -> shared memory -> DCAS -> DCAS control값 -> shared memory -> Vegicle-jetracer
 - LKAS에서 Curvature, throttle, steer 값 제공하면, 받아와서 정책 판단 시 고려.
+- 5월 첫째 주까지 4가지 맥락(기본, 졸음, 폰, 의식 없음)에 대해 전체 시스템이 동작하도록 만들기.
 ---
 
 ## 1) 프로젝트의 본질: “차량 한계”가 아니라 “운전자 한계”를 다루는 DCAS
