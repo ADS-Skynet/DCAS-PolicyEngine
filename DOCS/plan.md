@@ -14,7 +14,7 @@
 - 구현 언어: **C++ 우선**
 - 통신: **ZMQ 우선** (기존 ads-skynet 포트/패턴 정합)
 - 역할 분리:
-  - 인지팀: 물리/인지 신호 산출
+  - 인지팀: MediaPipe 물리값을 인지 신호(`eyes_on`, `confidence`, `reason`)로 가공
   - 정책팀(본 레포): 상태 전이 + 정책 판단 + 제한 명령 산출
   - HMI팀: 대시보드/표현
 - 사용자 지시 반영:
@@ -31,7 +31,7 @@
 
 1. 입력 수신/검증 (`dms.input.v1`)
 2. 상태 전이 계산 (`DriverState`, `DcasState`)
-3. 정책 매핑 (`reason + state + confidence -> actions`)
+3. 정책 매핑 (`state` 중심, `reason/confidence` 선택 보강 -> actions)
 4. 제한 명령 출력 (`dcas.state.v1`, `lkas.limit.v1`)
 
 ## 1.2 시스템 경계
@@ -59,9 +59,10 @@
 
 ### 2.1 Step A: 노트북 -> 정책엔진 입력
 
-- PC(Router)에서 생성되는 인지팀 송신 데이터(예):
-  - `eyes_on`, `driver_present`, `pose_confidence`
-  - `vlm.reason`, `vlm.confidence`, `parse_ok`, `latency_ms`
+- PC(Router)/인지 측에서 생성되는 인지팀 송신 데이터(예):
+  - **필수 최소 입력**: `eyes_on` (yes/no)
+  - **권장 확장 입력**: `confidence`, `reason`, `parse_ok`, `latency_ms`
+  - 원칙: MediaPipe raw 물리값(landmark/pose/gaze/head angle)은 Jetson 정책엔진으로 직접 전송하지 않고 인지 측에서 가공
 - LKAS 송신 데이터(예):
   - `curvature`, `throttle`, `steer`
 - 정책팀 수신:
@@ -71,17 +72,46 @@
 
 ### 2.2 Step B: 상태머신 전이
 
-- 타이머 누적:
-  - `eyes_off_elapsed`
-  - `driver_absent_elapsed`
-  - `warning_elapsed`
-- 전이:
-  - `OK -> WARNING -> UNRESPONSIVE -> ABSENT`
-  - 히스테리시스/복귀 지연 적용
+- 입력:
+  - `eyes_off_elapsed` (핵심)
+  - `vehicle_speed`, `road_curvature`
+  - `current_state`, `warning_elapsed`
+- 처리:
+  - 상태 전이 로직으로 `OK -> WARNING -> UNRESPONSIVE -> ABSENT` 계산
+  - 속도/커브 기반 임계값 보정 + 히스테리시스/복귀 지연 적용
+- 출력:
+  - `next_state` (`OK/WARNING/UNRESPONSIVE/ABSENT`)
+
+임계값 적용 규칙(eyes-off 기준):
+
+- speed band: `LOW(<10)`, `MID(10–25)`, `HIGH(>=25)` km/h
+- base threshold:
+  - `T_warn={3.0, 2.0, 1.5}s`
+  - `T_unresponsive={6.0, 4.0, 3.0}s`
+  - `T_absent={10.0, 8.0, 6.0}s`
+  - `T_recover={1.0, 1.2, 1.5}s`
+- 보정:
+  - `k_curve=0.8` (high curvature), 아니면 `1.0`
+  - `k_state=0.85` (이미 `WARNING`), 아니면 `1.0`
+- 최종식:
+  - `T_warn_eff = T_warn_base(speed_band) * k_curve * k_state`
+  - `T_unresp_eff = T_unresp_base(speed_band) * k_curve`
+
+전이 조건 예:
+
+- `eyes_off_elapsed >= T_warn_eff` -> `WARNING`
+- `eyes_off_elapsed >= T_unresp_eff` -> `UNRESPONSIVE`
+- `eyes_off_elapsed >= T_absent_eff` -> `ABSENT`
+- `eyes_on`이 `T_recover` 이상 유지될 때만 단계적 복귀
 
 ### 2.3 Step C: 정책 판단
 
-- 입력: `driver_state`, `dcas_state`, `reason`, `confidence`, `vehicle_speed`, `road_curvature`, `lkas_throttle`, `lkas_steer`
+- 입력:
+  - **필수**: `next_state`(from Step B), `lkas_throttle`, `lkas_steer`
+  - **선택 보강**: `reason`, `confidence`, `vehicle_speed`, `road_curvature`
+- 처리:
+  - `next_state`와 LKAS 계산값을 받아 제어 제한/HMI 강도를 결정
+  - speed/curvature가 위험할수록 동일 state에서도 더 보수적인 제한 적용
 - 출력:
   - HMI 액션(`HMI_WARN`, `BEEP_LEVEL_UP`)
   - 제어 제한(`throttle_limit`, `steer_limit`)
@@ -111,7 +141,7 @@
 ### 2.6 Fast loop / Slow loop 정책 우선순위
 
 - Fast loop (MediaPipe 기반 1차 인지):
-  - `eyes_on`, `driver_present` 변화는 저지연으로 즉시 정책 반영
+  - `eyes_on` 변화는 저지연으로 즉시 정책 반영
   - 경고/제한의 1차 트리거는 Fast loop 신호를 기준으로 판단
 - Slow loop (VLM 맥락 추론):
   - 비동기 후행 입력으로 취급
@@ -133,6 +163,42 @@ stale/지연 처리 규칙:
 
 - 상태 상승은 빠르게, 복귀는 느리게 적용
 - 단일 프레임 복귀 신호로 `UNRESPONSIVE -> WARNING` 또는 `WARNING -> OK` 즉시 복귀 금지
+
+### 2.7 미디어파이프 물리값 처리 위치 권고
+
+권장 아키텍처는 “인지 측에서 eyes-on 판단 후 Jetson으로 최소 신호 전송”이다.
+
+- 인지 측(Cognition/고사양): MediaPipe 물리값(landmark/pose/gaze/head) -> `eyes_on`(필수) + `confidence`/`reason`(선택) 계산
+- Jetson(정책 실행): 수신된 가공 신호 기반으로 Step B(상태 전이) -> Step C(제어 정책) 수행
+- 인터페이스 기본값: `eyes_on` 단일 신호만으로도 정책이 동작해야 하며, 추가 필드는 성능 보강용으로만 사용
+
+권장 전송 스키마(최소):
+
+```json
+{
+  "timestamp": 1710000000,
+  "eyes_on": 1
+}
+```
+
+권장 전송 스키마(확장):
+
+```json
+{
+  "timestamp": 1710000000,
+  "eyes_on": 1,
+  "confidence": 0.95,
+  "reason": "none",
+  "parse_ok": true,
+  "latency_ms": 35
+}
+```
+
+이유:
+
+- Jetson 연산/통신 부하를 줄여 실시간성과 안정성을 높임
+- 정책 엔진의 책임을 상태/정책 판단으로 한정해 디버깅이 쉬움
+- MediaPipe 버전 변경 시 정책 엔진 인터페이스 변동을 최소화할 수 있음
 
 ---
 
