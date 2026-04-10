@@ -37,6 +37,26 @@
 - `next_state`
 - `transition_reason`
 
+### 2.3 band 경계값 정의 (기준선)
+
+> 경계값도 기준선의 일부로 고정하며, 플랫폼별 튜닝 시 버전 태깅하여 변경한다.
+
+- `speed_band`
+  - `LOW`: `v < 10 km/h`
+  - `MID`: `10 <= v < 25 km/h`
+  - `HIGH`: `v >= 25 km/h`
+- `curvature_band`
+  - `LOW`: `|curvature| < C1`
+  - `HIGH`: `|curvature| >= C1`
+
+초기 기준선:
+
+- `C1 = 0.02 1/m` (등가 반경 약 `R=50m`)
+
+주의:
+
+- `C1`은 B/C 등급 캘리브레이션 항목이며, 변경 시 근거/로그와 함께 문서 버전을 올린다.
+
 ---
 
 ## 3) 기본 임계값 (기준선 1차값)
@@ -67,6 +87,11 @@
 
 - `T_warn_eff >= 1.0s`
 
+규정 상한(하드 리미트):
+
+- `T_warn_eff <= 5.0s` (UNECE R171 EOR 앵커 보호)
+- 구현 권장: `T_warn_eff = clamp(T_warn_eff_raw, 1.0s, 5.0s)`
+
 ---
 
 ## 5) 전이 규칙 (결정 순서 고정)
@@ -79,12 +104,44 @@
 | WARNING | `eyes_off_elapsed >= T_unresp_eff` | UNRESPONSIVE |
 | UNRESPONSIVE | `eyes_off_elapsed >= T_absent_eff` | ABSENT |
 | WARNING/UNRESPONSIVE/ABSENT | `eyes_on`이 `T_recover` 이상 연속 유지 | 한 단계 하향 |
-| ANY | `input_stale=true` 또는 입력 누락 | 최소 `WARNING` 유지 (fail-safe) |
+| ANY | `input_stale=true` 또는 입력 누락 | stale fail-safe 규칙 적용 |
 
 보조 규칙:
 
 - 단일 프레임 `eyes_on`으로 즉시 복귀 금지
 - 복귀는 항상 단계적으로만 수행
+
+### 5.1 복귀 시 타이머 처리(명시)
+
+복귀 시 `eyes_off_elapsed`를 0으로 즉시 초기화하지 않는다.
+
+- 보조 상수:
+  - `Delta_down = max(0.3s, 0.1 * T_warn_eff)`
+  - `T_clear = 3.0s` (연속 eyes-on 완전 리셋 기준)
+
+단계 하향 직후 처리:
+
+- `UNRESPONSIVE -> WARNING` 시:
+  - `eyes_off_elapsed = min(eyes_off_elapsed, T_unresp_eff - Delta_down)`
+- `WARNING -> OK` 시:
+  - `eyes_off_elapsed = min(eyes_off_elapsed, T_warn_eff - Delta_down)`
+
+완전 리셋 조건:
+
+- `eyes_on`이 연속 `T_clear` 이상 유지되면 `eyes_off_elapsed = 0`으로 리셋
+
+의도:
+
+- 짧은 eyes-on 반복으로 타이머를 악용해 경고를 우회하는 패턴(system abuse)을 방지
+
+### 5.2 stale fail-safe 규칙(충돌 방지)
+
+`input_stale=true` 또는 필수 입력 누락 시 다음 규칙을 적용한다.
+
+- `current_state == OK` 이면 `next_state = WARNING`으로 강제 상향
+- `current_state in {WARNING, UNRESPONSIVE, ABSENT}` 이면 **현재 상태 동결(freeze)**
+- stale 동안 상태 하향(완화) 금지
+- stale 해제 후에만 정상 전이/복귀 로직 재개
 
 ---
 
@@ -112,7 +169,9 @@
 | `k_curve` | `0.8` | 고부하 상황에서 보수화 필요 경향[^s5][^s6] | 맥락 보정 |
 | `k_state` | `0.85` | 지속 disengagement 빠른 대응 필요(운영 가정)[^s8][^s10] | 운영 설계 |
 | `T_recover` | 단계적 복귀 | 최소 재참여 시간 요구(200ms)[^s10] | 재참여 안정화 |
-| stale fail-safe | 최소 WARNING | 규정 경고전략 + 안전 우선[^s8][^s10] | 안전 원칙 |
+| speed/curvature 경계값 | `10/25 km/h`, `C1=0.02 1/m` | 기존 기준선 문서 상수 + 맥락 의존 연구[^s5][^s6] | 기준선 경계(B/C) |
+| `T_warn_eff` 상한 | `<=5.0s` clamp | UNECE EOR 5s 앵커 보호[^s10] | 규정 방어 로직 |
+| stale fail-safe | `OK->WARNING`, `WARNING+`는 freeze | 규정 경고전략 + 안전 우선[^s8][^s10] | 안전 원칙 |
 
 ---
 
@@ -131,10 +190,12 @@
 | EOR 5s / escalation +3s / DCA +5s / unavailability +10s / re-engagement 200ms | 확정값(규정앵커) | A | UNECE R171 조항[^s10] |
 | `T_warn` MID=2.0s | 가정값(캘리브레이션) | B | 2s 위험 경계 신호 정합[^s1][^s2][^s3][^s11] |
 | speed band 테이블 | 가정값(캘리브레이션) | B | 맥락 의존 연구 기반[^s5][^s6] |
+| speed/curvature 경계값(`10/25`, `C1`) | 가정값(캘리브레이션) | B | 기준선 경계 상수(변경 시 버전관리) |
 | `T_unresponsive`, `T_absent` | 가정값(캘리브레이션) | B | 단계형 경고 설계 + 시험체계 정합[^s7][^s12] |
 | `k_curve` | 가정값(캘리브레이션) | B | 곡선/맥락 보수화 |
 | `k_state`, `T_warn_eff` 하한 | 가정값(캘리브레이션) | C | 운영 안정성 가정 |
-| stale 시 최소 WARNING | 확정규칙(안전원칙) | B | 안전 우선 |
+| `T_warn_eff` 상한 clamp(`<=5.0s`) | 확정규칙(규정보호) | A | UNECE EOR 5s 위반 방지 |
+| stale 시 `OK->WARNING`, `WARNING+` freeze | 확정규칙(안전원칙) | B | 안전 우선 |
 
 ---
 
