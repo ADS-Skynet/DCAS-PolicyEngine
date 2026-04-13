@@ -14,11 +14,11 @@ Step B 상태(`OK -> WARNING -> UNRESPONSIVE -> ABSENT`)를 입력받아,
 ## 1) Step C 목적과 범위
 
 - 목적:
-  - 운전자 상태 악화 시 위험 완화(속도·조향 보수화, 경고 강화)
+  - 운전자 상태 악화 시 위험 완화(감속/경고 강화)
   - 재참여 유도(EOR/HOR/DCA 메시지 일관화)
   - Driver Unavailability 단계에서 최소위험 정지 방향으로 전환
 - 범위:
-  - `throttle_limit`, `steer_limit`, `hmi_action`, `emergency_flag`
+  - `throttle_limit`, `hmi_action`, `emergency_flag`
   - 다중 시스템 경고 우선순위/충돌 해소
 - 비범위:
   - 상태 전이 타이밍 계산(= Step B)
@@ -32,10 +32,9 @@ Step B 상태(`OK -> WARNING -> UNRESPONSIVE -> ABSENT`)를 입력받아,
 
 - `driver_state`: `OK | WARNING | UNRESPONSIVE | ABSENT`
 - `reason`: `phone | drowsy | unresponsive | none | unknown`
-- `lkas_throttle`, `lkas_steer`: LKAS가 요청한 원시 제어값
+- `lkas_throttle`: LKAS가 요청한 원시 종방향 제어값
 - `input_stale`: 센서/파싱 stale
 - `aeb_active` (optional): 긴급 제동/충돌회피 시스템 활성 상태
-- `aes_active` (optional): 긴급 회피 조향(AES) 활성 상태
 
 설계 원칙:
 
@@ -45,7 +44,6 @@ Step B 상태(`OK -> WARNING -> UNRESPONSIVE -> ABSENT`)를 입력받아,
 ### 2.2 출력
 
 - `throttle_limit`
-- `steer_limit`
 - `hmi_action`
 - `emergency_flag`: `OFF | SOFT | HARD`
 
@@ -78,24 +76,20 @@ Step B 상태(`OK -> WARNING -> UNRESPONSIVE -> ABSENT`)를 입력받아,
 
 > 아래 수치는 JetRacer급 플랫폼의 보수 기준선이다. 차량 플랫폼별 재튜닝 전제로 사용한다.
 
-| DriverState | throttle_limit | steer_limit | HMI | emergency_flag |
-|---|---:|---:|---|---|
-| OK | `1.00 * lkas_throttle` | `1.00 * lkas_steer` | 상태표시만 | OFF |
-| WARNING | `<= 0.60 * lkas_throttle` | `<= 0.80 * lkas_steer` | EOR/HOR 에스컬레이션(반복 음향/햅틱) | OFF |
-| UNRESPONSIVE | `<= 0.20 * lkas_throttle` | `<= 0.60 * lkas_steer` | DCA + 카운트다운 | SOFT |
-| ABSENT | `0.0` | `<= 0.50 * lkas_steer` | Driver Unavailability Response(최대 경고) | HARD |
+| DriverState | throttle_limit | HMI | emergency_flag |
+|---|---:|---|---|
+| OK | `1.00 * lkas_throttle` | 상태표시만 | OFF |
+| WARNING | `<= 0.60 * lkas_throttle` | EOR/HOR 에스컬레이션(반복 음향/햅틱) | OFF |
+| UNRESPONSIVE | `<= 0.20 * lkas_throttle` | DCA + 카운트다운 | SOFT |
+| ABSENT | `0.0` | Driver Unavailability Response(최대 경고) | HARD |
 
 실행 규칙:
 
 - 상위 상태 완화 금지: `ABSENT > UNRESPONSIVE > WARNING > OK`
 - `HARD`면 항상 `throttle_limit = 0.0`
-- `steer_limit`는 차선 유지 가능한 최소 수준은 유지(완전 0 금지)
-- 제어 대상 명확화: 본 명세의 `steer_limit`은 목표 조향각을 축소하는 값이 아니라,
-  하위 제어기의 최대 조향 토크(`max_steering_torque`) 또는 조향 변화율(`steer_slew_rate`) 제한 배율로 해석한다.
-- 상태 전이로 `throttle_limit`/`steer_limit` 목표가 급변하면, 최종 인가값은 반드시 Rate Limiter 또는 LPF를 통과한다.
-  - 권장 예: `|d(throttle_limit_cmd)/dt| <= 0.1 /s`, `|d(steer_limit_cmd)/dt| <= 0.1 /s`
-- `emergency_flag=HARD`이면 단순 `throttle=0`만으로 종료하지 않고,
-  가능 시 MRM 감속 모드(능동 제동)로 전환한다.
+- 상태 전이로 `throttle_limit` 목표가 급변하면, 최종 인가값은 반드시 Rate Limiter 또는 LPF를 통과한다.
+  - 권장 예: `|d(throttle_limit_cmd)/dt| <= 0.1 /s`
+- `emergency_flag=HARD`이면 단순 `throttle=0`만으로 종료하지 않고, 가능 시 MRM 감속 모드(능동 제동)로 전환한다.
   - 권장 예: `a_mrm_cmd <= -2.0 m/s^2` (플랫폼/브레이크 HW capability에 맞춰 캘리브레이션)
 
 ---
@@ -143,9 +137,6 @@ Overlay 불변식:
 - `aeb_active=true`면:
   - Step C HMI를 보조 채널로 격하(메인 경고는 AEBS)
   - 종방향(`throttle_limit`)은 더 보수적인 값 선택(`min` 규칙)
-  - 기본적으로 횡방향(`steer_limit`)도 보수화 유지
-  - 예외: `aes_active=true`(긴급 회피 조향) 시 `steer_limit=1.0`으로 즉시 복귀하여
-    긴급 회피 조향을 방해하지 않도록 한다.
 
 ### 7.2 stale/fault 처리
 
@@ -156,8 +147,8 @@ Overlay 불변식:
 
 ### 7.3 경계/종료 controllability
 
-- 시스템 종료/경계 초과/오류 상황에서도 급격한 조향변화 금지
-- `steer_limit`는 단계적으로 축소하되 운전자 즉시 개입 가능성 보장
+- 시스템 종료/경계 초과/오류 상황에서도 급격한 종방향 변화 금지
+- 조향은 LKAS 원출력을 유지하고, DCAS는 종방향 제한 및 HMI/긴급 상태만 중재
 
 ---
 
@@ -177,12 +168,10 @@ Overlay 불변식:
 | 경고 충돌 시 emergency 우선 고려 | 확정값 | A | UNECE 5.5.4.2.2.2[^c1] |
 | controllable termination/driver intervention 보장 | 확정값 | A | UNECE 5.3.5.2.1, 5.3.6.1[^c1] |
 | EF 개입 5초 이내 시작 요구 | 확정값 | A | Euro NCAP 1.4.3.3[^c2] |
-| 상태별 throttle/steer 비율값 | 가정값 | C | JetRacer baseline, 실차별 재튜닝 |
+| 상태별 throttle 비율값 | 가정값 | C | JetRacer baseline, 실차별 재튜닝 |
 | reason overlay 보수화 비율(5%, 10%) | 가정값 | C | 운영 안정성 가정 |
-| `steer_limit`의 토크/변화율 해석 | 가정값(권장 규칙) | B | 조향각 직접 축소에 따른 차선유지 악화 리스크 회피 |
 | 상태 전이 시 Rate Limiter/LPF | 가정값(권장 규칙) | B | UNECE controllability/driver intervention 취지 정합[^c1] |
 | `HARD` 시 능동 제동(MRM 감속) | 가정값(권장 규칙) | C | 규정은 응답 요구, 감속도 수치(`-2.0`)는 플랫폼 캘리브레이션 |
-| `aes_active` 시 `steer_limit=1.0` 예외 | 가정값(권장 규칙) | C | AEB/AES와의 충돌 방지 목적의 시스템 설계 규칙 |
 
 ---
 
@@ -193,17 +182,15 @@ PolicyOutput evaluate_policy(
   DriverState driver_state,
   Reason reason,
   float lkas_throttle,
-  float lkas_steer,
   bool input_stale,
-  bool aeb_active,
-  bool aes_active
+  bool aeb_active
 )
 ```
 
 반환:
 
 ```text
-{ throttle_limit, steer_limit, hmi_action, emergency_flag }
+{ throttle_limit, hmi_action, emergency_flag }
 ```
 
 권장 단위 테스트:

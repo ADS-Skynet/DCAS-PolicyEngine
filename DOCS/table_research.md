@@ -80,14 +80,14 @@
 
 ## 4) Core Action Mapping Table
 
-| DriverState | speed/curvature | throttle_limit | steer_limit | HMI | emergency flag |
-|---|---|---:|---:|---|---|
-| OK | 모든 조건 | LKAS 값 유지 | LKAS 값 유지 | 없음/상태표시 | OFF |
-| WARNING | LOW & low-curv | `<= 0.75 * lkas_throttle` | `<= 0.90 * lkas_steer` | 시각 경고 + 단일 비프 | OFF |
-| WARNING | MID/HIGH 또는 high-curv | `<= 0.60 * lkas_throttle` | `<= 0.80 * lkas_steer` | 시각 경고 + 반복 비프 | OFF |
-| UNRESPONSIVE | LOW | `<= 0.35 * lkas_throttle` | `<= 0.70 * lkas_steer` | 강한 경고 + 카운트다운 | ON(soft) |
-| UNRESPONSIVE | MID/HIGH 또는 high-curv | `<= 0.20 * lkas_throttle` | `<= 0.60 * lkas_steer` | 강한 경고 + 카운트다운 | ON(soft) |
-| ABSENT | 모든 조건 | `0.0` | `<= 0.50 * lkas_steer` | 최대 경고(정지 유도) | ON(hard) |
+| DriverState | speed/curvature | throttle_limit | HMI | emergency flag |
+|---|---|---:|---|---|
+| OK | 모든 조건 | LKAS 값 유지 | 없음/상태표시 | OFF |
+| WARNING | LOW & low-curv | `<= 0.75 * lkas_throttle` | 시각 경고 + 단일 비프 | OFF |
+| WARNING | MID/HIGH 또는 high-curv | `<= 0.60 * lkas_throttle` | 시각 경고 + 반복 비프 | OFF |
+| UNRESPONSIVE | LOW | `<= 0.35 * lkas_throttle` | 강한 경고 + 카운트다운 | ON(soft) |
+| UNRESPONSIVE | MID/HIGH 또는 high-curv | `<= 0.20 * lkas_throttle` | 강한 경고 + 카운트다운 | ON(soft) |
+| ABSENT | 모든 조건 | `0.0` | 최대 경고(정지 유도) | ON(hard) |
 
 ### 4.1 정책 의도
 
@@ -101,7 +101,7 @@
 
 | reason | 적용 상태 | 제어값 영향 | HMI 문구/동작 |
 |---|---|---|---|
-| `phone` | WARNING+ | 기본 제한 + `steer_limit` 추가 5% 보수화 | “전방주시 필요(휴대폰 감지)” + 비프 주기 단축 |
+| `phone` | WARNING+ | 기본 제한 유지 | “전방주시 필요(휴대폰 감지)” + 비프 주기 단축 |
 | `drowsy` | WARNING+ | 기본 제한 + `throttle_limit` 추가 10% 보수화 | “졸음 경고, 즉시 주시” + 단계 상승 |
 | `unresponsive` | UNRESPONSIVE/ABSENT | Core와 동일(완화 금지) | “반응 없음, 감속/정지 유도” |
 | `none/unknown` | 모든 상태 | Core만 적용 | 일반 eyes-on 경고 |

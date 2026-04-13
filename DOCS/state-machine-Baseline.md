@@ -23,39 +23,69 @@
 ### 2.1 입력
 
 - 필수 입력
-  - `eyes_off_elapsed`
-  - `speed_band` (`LOW`/`MID`/`HIGH`)
-  - `curvature_band` (`LOW`/`HIGH`)
+  - `is_attentive` (`yes/no`)  
+    - 인지팀에서 실시간으로 전송하는 운전자 집중 여부
+  - `vehicle_speed_kmh`
+  - `lkas_steer_abs` (`|steering|`, 범위 `0.0 ~ 0.65`)
   - `current_state`
 - 선택 입력
-  - `warning_elapsed`
-  - `driver_absent_elapsed`
+  - `inattentive_elapsed`  
+    - 외부에서 주는 값이 아니라 Step B 내부 누적 타이머(기본)
+  - `warning_elapsed` (WARNING 상태 체류시간)
   - `input_stale` (센서 stale/파싱 실패 플래그)
+  - `vlm_context` (노트북 VLM 후행 결과, optional)
 
 ### 2.2 출력
 
 - `next_state`
 - `transition_reason`
+- `warning_event` (`true/false`)  
+  - `OK -> WARNING` 최초 진입 시 `true`
+- `vlm_request_hint` (`none|request_context`)  
+  - `warning_event=true`일 때 노트북 측 VLM 호출 트리거 힌트
 
-### 2.3 band 경계값 정의 (기준선)
+### 2.3 band 경계값 정의 (스케일카 기준)
 
 > 경계값도 기준선의 일부로 고정하며, 플랫폼별 튜닝 시 버전 태깅하여 변경한다.
 
-- `speed_band`
-  - `LOW`: `v < 10 km/h`
-  - `MID`: `10 <= v < 25 km/h`
-  - `HIGH`: `v >= 25 km/h`
-- `curvature_band`
-  - `LOW`: `|curvature| < C1`
-  - `HIGH`: `|curvature| >= C1`
+- `speed_band`는 정규화 속도로 정의
+  - `rho_v = vehicle_speed_kmh / V_safe_max_kmh`
+  - `LOW`: `rho_v < 0.30`
+  - `MID`: `0.30 <= rho_v < 0.65`
+  - `HIGH`: `rho_v >= 0.65`
 
-초기 기준선:
+- 속도 추정 노이즈 대응(필수)
+  - 원시 `rho_v_raw`를 그대로 band 판정에 사용하지 않는다.
+  - 1차 저역통과필터(LPF) 적용:
+    - `rho_v_f[k] = alpha * rho_v_f[k-1] + (1-alpha) * rho_v_raw[k]`
+    - 권장 시작값: `alpha = 0.85 ~ 0.95` (주기 `dt` 50~100ms)
+  - 히스테리시스 band 경계 적용(예시):
+    - `LOW -> MID`: `rho_v_f > 0.32`
+    - `MID -> LOW`: `rho_v_f < 0.28`
+    - `MID -> HIGH`: `rho_v_f > 0.67`
+    - `HIGH -> MID`: `rho_v_f < 0.63`
+  - 최소 유지시간(dwell) 적용:
+    - 경계 조건이 `T_band_hold` 이상 유지될 때만 band 전환
+    - 권장 시작값: `T_band_hold = 0.3s`
 
-- `C1 = 0.02 1/m` (등가 반경 약 `R=50m`)
+- 구현 순서(고정)
+  - `rho_v_raw` 계산 -> LPF -> 히스테리시스 + dwell -> `speed_band` 결정
+  - 임계시간 계산(`T_warn_eff`, `T_unresp_eff`, `T_absent_eff`)은 안정화된 `speed_band`만 사용
+
+- `steer_band`는 정규화 조향으로 정의
+  - `rho_s = lkas_steer_abs / 0.65`
+  - `LOW`: `rho_s < 0.30`
+  - `MID`: `0.30 <= rho_s < 0.65`
+  - `HIGH`: `rho_s >= 0.65`
+
+초기 스케일카 권장:
+
+- `V_safe_max_kmh`: 스케일카 직선 안전최대속도(측정값)
+- `lkas_steer_abs`는 LKAS 주행 시 관측 범위 `0.0 ~ 0.65`를 사용
 
 주의:
 
-- `C1`은 B/C 등급 캘리브레이션 항목이며, 변경 시 근거/로그와 함께 문서 버전을 올린다.
+- speed/steer 경계값(`0.30`, `0.65`)은 캘리브레이션 항목이며, 변경 시 로그 근거를 함께 남긴다.
 
 ---
 
@@ -70,18 +100,27 @@
 | MID | 2.0s | 4.0s | 8.0s | 1.2s |
 | HIGH | 1.5s | 3.0s | 6.0s | 1.5s |
 
+설명:
+
+- 인지팀 입력은 `is_attentive` yes/no만 받는다.
+- Step B 내부에서 `is_attentive=no`가 지속된 시간을 `inattentive_elapsed`로 누적한다.
+- 전이는 `inattentive_elapsed`와 유효 임계시간 비교로 결정한다.
+
 ---
 
 ## 4) 보정계수 및 적용식
 
-- 곡률 보정: `k_curve = 0.8` (HIGH curvature), 아니면 `1.0`
+- 스티어 보정: `k_steer`
+  - `LOW`: `1.00`
+  - `MID`: `0.90`
+  - `HIGH`: `0.80`
 - 상태 보정: 이미 `WARNING`이면 `k_state = 0.85`, 아니면 `1.0`
 
 적용식:
 
-- `T_warn_eff = T_warn_base(speed_band) * k_curve * k_state`
-- `T_unresp_eff = T_unresp_base(speed_band) * k_curve`
-- `T_absent_eff = T_absent_base(speed_band) * k_curve`
+- `T_warn_eff = T_warn_base(speed_band) * k_steer * k_state`
+- `T_unresp_eff = T_unresp_base(speed_band) * k_steer`
+- `T_absent_eff = T_absent_base(speed_band) * k_steer`
 
 안전 하한:
 
@@ -100,20 +139,33 @@
 
 | 현재 상태 | 조건 | 다음 상태 |
 |---|---|---|
-| OK | `eyes_off_elapsed >= T_warn_eff` | WARNING |
-| WARNING | `eyes_off_elapsed >= T_unresp_eff` | UNRESPONSIVE |
-| UNRESPONSIVE | `eyes_off_elapsed >= T_absent_eff` | ABSENT |
-| WARNING/UNRESPONSIVE/ABSENT | `eyes_on`이 `T_recover` 이상 연속 유지 | 한 단계 하향 |
+| OK | `inattentive_elapsed >= T_warn_eff` | WARNING |
+| WARNING | `inattentive_elapsed >= T_unresp_eff` | UNRESPONSIVE |
+| UNRESPONSIVE | `inattentive_elapsed >= T_absent_eff` | ABSENT |
+| WARNING/UNRESPONSIVE/ABSENT | `is_attentive=yes`가 `T_recover` 이상 연속 유지 | 한 단계 하향 |
 | ANY | `input_stale=true` 또는 입력 누락 | stale fail-safe 규칙 적용 |
 
 보조 규칙:
 
-- 단일 프레임 `eyes_on`으로 즉시 복귀 금지
+- 단일 프레임 `is_attentive=yes`로 즉시 복귀 금지
 - 복귀는 항상 단계적으로만 수행
 
-### 5.1 복귀 시 타이머 처리(명시)
+### 5.1 WARNING 시 노트북 VLM 호출 흐름
 
-복귀 시 `eyes_off_elapsed`를 0으로 즉시 초기화하지 않는다.
+- `OK -> WARNING` 최초 진입 시:
+  - `warning_event=true`
+  - `vlm_request_hint=request_context`
+  - 노트북은 이를 수신해 VLM 호출
+- 노트북은 VLM 결과(`reason/confidence`)를 후행으로 Jetson에 전송
+- Step B는 VLM 결과를 상태 전이의 필수 조건으로 사용하지 않으며,
+  Step C/HMI 보강 입력으로만 사용한다.
+
+즉, 상태 전이는 `is_attentive` 기반으로 항상 독립 동작하고,
+VLM은 WARNING 이후 맥락 보강 계층이다.
+
+### 5.2 복귀 시 타이머 처리(명시)
+
+복귀 시 `inattentive_elapsed`를 0으로 즉시 초기화하지 않는다.
 
 - 보조 상수:
   - `Delta_down = max(0.3s, 0.1 * T_warn_eff)`
@@ -122,19 +174,19 @@
 단계 하향 직후 처리:
 
 - `UNRESPONSIVE -> WARNING` 시:
-  - `eyes_off_elapsed = min(eyes_off_elapsed, T_unresp_eff - Delta_down)`
+  - `inattentive_elapsed = min(inattentive_elapsed, T_unresp_eff - Delta_down)`
 - `WARNING -> OK` 시:
-  - `eyes_off_elapsed = min(eyes_off_elapsed, T_warn_eff - Delta_down)`
+  - `inattentive_elapsed = min(inattentive_elapsed, T_warn_eff - Delta_down)`
 
 완전 리셋 조건:
 
-- `eyes_on`이 연속 `T_clear` 이상 유지되면 `eyes_off_elapsed = 0`으로 리셋
+- `is_attentive=yes`가 연속 `T_clear` 이상 유지되면 `inattentive_elapsed = 0`으로 리셋
 
 의도:
 
 - 짧은 eyes-on 반복으로 타이머를 악용해 경고를 우회하는 패턴(system abuse)을 방지
 
-### 5.2 stale fail-safe 규칙(충돌 방지)
+### 5.3 stale fail-safe 규칙(충돌 방지)
 
 `input_stale=true` 또는 필수 입력 누락 시 다음 규칙을 적용한다.
 
@@ -145,7 +197,81 @@
 
 ---
 
-## 6) UNECE R171 정합 앵커 (고정)
+## 6) 임계 시간 산정 방법 (속도/스티어 기반, 상세)
+
+질문 포인트:
+
+- "차량 속도/스티어링에 따라 다음 상태로 넘어가는 inattentive 임계시간이 달라져야 한다"
+
+타당한 방법은 아래 3단계다.
+
+### 6.1 1단계: 기본축 고정 (human-factor 앵커)
+
+- 기본축은 `speed_band`별 테이블을 사용한다.
+- 이유:
+  - 규정 구조(EOR/escalation/DCA/unavailability)가 시간 축으로 정의됨
+  - 자연주의 연구에서 eyes-off 지속시간이 위험 증가와 직접 연관
+
+즉, 기본 `T_warn/T_unresp/T_absent`는 사람 반응시간 앵커로 시작한다.
+
+### 6.2 2단계: 스티어 부하 보정 (vehicle-context 보정)
+
+- 스티어 절대값이 커질수록(코너/부하 증가) 임계시간을 짧게 만든다.
+- `k_steer`를 곱해 보수화한다.
+
+권장 초기값:
+
+- `LOW`: `1.00`
+- `MID`: `0.90`
+- `HIGH`: `0.80`
+
+해석:
+
+- 조향 부하가 높은 구간에서는 inattentive 허용 시간을 10~20% 줄여 경고를 앞당긴다.
+
+### 6.3 3단계: 로그 기반 밴드별 보정
+
+임의값 방지를 위해 아래 지표로 조정한다.
+
+- `Late Warning Rate` (위험 구간인데 경고가 늦은 비율)
+- `Early Warning Rate` (불필요하게 이른 경고 비율)
+- `Recovery Instability` (복귀 직후 재경고 반복)
+
+보정 규칙(권장):
+
+- `Late Warning Rate` 높음 -> 해당 band `T_warn_base` 10% 감소
+- `Early Warning Rate` 높음 -> 해당 band `T_warn_base` 10% 증가
+- 복귀 흔들림 높음 -> `T_recover` 0.2s 증가
+
+중요:
+
+- 한 번에 큰 폭 조정 금지(한 iteration당 ±10% 이내)
+- 각 조정은 최소 3개 시나리오(직선/완만커브/급조향) 로그 후 적용
+
+이 절차가 "임의값" 대신 "근거 기반"으로 시간을 정하는 방법이다.
+
+### 6.4 산업 적용 시 채터링 방지 표준 패턴
+
+실차/양산 ECU에서도 band 경계 채터링은 공통 이슈이며, 보통 아래를 조합한다.
+
+- 신호 안정화: LPF(또는 이동평균)로 추정 속도 노이즈 저감
+- 경계 안정화: 히스테리시스 임계값(상향/하향 분리)
+- 전이 안정화: 최소 유지시간(dwell), debounce 카운트
+- 제어 안정화: band 변경 직후 `T_warn_eff`를 즉시 점프하지 않고 완만 갱신
+
+권장 완만 갱신식:
+
+- `T_warn_eff[k] = beta * T_warn_eff[k-1] + (1-beta) * T_warn_eff_target[k]`
+- 권장 시작값: `beta = 0.7 ~ 0.9`
+
+적용 원칙:
+
+- 위험도 상향(더 보수적 band)은 빠르게, 하향(완화)은 느리게 적용
+- 노이즈로 인한 단기 왕복보다, 실제 주행 맥락 변화에 반응하도록 시간상 분리
+
+---
+
+## 7) UNECE R171 정합 앵커 (고정)
 
 다음 항목은 Step B 기준선의 규정 앵커다.
 
@@ -159,23 +285,23 @@
 
 ---
 
-## 7) 근거-파라미터 추적표
+## 8) 근거-파라미터 추적표
 
 | Step B 항목 | 현재 정책값/규칙 | 근거 출처 | 근거 성격 |
 |---|---|---|---|
-| `T_warn` 기준축 | MID 2.0s | `>2s` eyes-off 위험 증가[^s1][^s2], NHTSA 2s 원칙[^s3][^s4], 100-Car 보고서[^s11] | 정량 위험 + 가이드라인 |
+| `T_warn` 기준축 | MID 2.0s | `>2s` inattentive 지속 위험 증가[^s1][^s2], NHTSA 2s 원칙[^s3][^s4], 100-Car 보고서[^s11] | 정량 위험 + 가이드라인 |
 | speed band별 단축 | LOW > MID > HIGH | 맥락/시나리오/속도에 따라 주의여유 변화[^s5][^s6] | 맥락 의존 정책화 |
 | `T_unresponsive`, `T_absent` 단계 | 단계형 상승 | eyes-off와 lane-keeping 저하 연계[^s7], 경고 단계 시험체계[^s8][^s9][^s12] | 성능 저하 + 시험 구조 |
-| `k_curve` | `0.8` | 고부하 상황에서 보수화 필요 경향[^s5][^s6] | 맥락 보정 |
+| `k_steer` | `LOW/MID/HIGH=1.0/0.9/0.8` | 고부하 상황에서 보수화 필요 경향[^s5][^s6] | 맥락 보정 |
 | `k_state` | `0.85` | 지속 disengagement 빠른 대응 필요(운영 가정)[^s8][^s10] | 운영 설계 |
 | `T_recover` | 단계적 복귀 | 최소 재참여 시간 요구(200ms)[^s10] | 재참여 안정화 |
-| speed/curvature 경계값 | `10/25 km/h`, `C1=0.02 1/m` | 기존 기준선 문서 상수 + 맥락 의존 연구[^s5][^s6] | 기준선 경계(B/C) |
+| speed/steer 경계값 | `rho_v`, `rho_s` band 경계 | 맥락 의존 연구 + 스케일카 정규화 전략[^s5][^s6] | 기준선 경계(B/C) |
 | `T_warn_eff` 상한 | `<=5.0s` clamp | UNECE EOR 5s 앵커 보호[^s10] | 규정 방어 로직 |
 | stale fail-safe | `OK->WARNING`, `WARNING+`는 freeze | 규정 경고전략 + 안전 우선[^s8][^s10] | 안전 원칙 |
 
 ---
 
-## 8) 근거 강도 등급 및 확정/가정 분리
+## 9) 근거 강도 등급 및 확정/가정 분리
 
 ### 8.1 근거 강도 등급
 
@@ -190,16 +316,16 @@
 | EOR 5s / escalation +3s / DCA +5s / unavailability +10s / re-engagement 200ms | 확정값(규정앵커) | A | UNECE R171 조항[^s10] |
 | `T_warn` MID=2.0s | 가정값(캘리브레이션) | B | 2s 위험 경계 신호 정합[^s1][^s2][^s3][^s11] |
 | speed band 테이블 | 가정값(캘리브레이션) | B | 맥락 의존 연구 기반[^s5][^s6] |
-| speed/curvature 경계값(`10/25`, `C1`) | 가정값(캘리브레이션) | B | 기준선 경계 상수(변경 시 버전관리) |
+| speed/steer 경계값(`rho_v`, `rho_s`) | 가정값(캘리브레이션) | B | 스케일카 정규화 경계(변경 시 버전관리) |
 | `T_unresponsive`, `T_absent` | 가정값(캘리브레이션) | B | 단계형 경고 설계 + 시험체계 정합[^s7][^s12] |
-| `k_curve` | 가정값(캘리브레이션) | B | 곡선/맥락 보수화 |
+| `k_steer` | 가정값(캘리브레이션) | B | 조향 부하 보수화 |
 | `k_state`, `T_warn_eff` 하한 | 가정값(캘리브레이션) | C | 운영 안정성 가정 |
 | `T_warn_eff` 상한 clamp(`<=5.0s`) | 확정규칙(규정보호) | A | UNECE EOR 5s 위반 방지 |
 | stale 시 `OK->WARNING`, `WARNING+` freeze | 확정규칙(안전원칙) | B | 안전 우선 |
 
 ---
 
-## 9) Step B 심화 조사 요약 (고신뢰 출처)
+## 10) Step B 심화 조사 요약 (고신뢰 출처)
 
 ### 9.1 자연주의 데이터
 
@@ -218,15 +344,15 @@
 
 ---
 
-## 10) 운영 원칙 (기준선 유지 규칙)
+## 11) 운영 원칙 (기준선 유지 규칙)
 
 - `A` 등급 항목(규정 앵커)은 문서/코드/테스트에서 고정 관리
 - `B/C` 항목은 플랫폼별 데이터로 재추정하고 버전 태깅
-- 문서/코드 동일 파라미터 키(`T_warn_base`, `k_curve`, `T_recover`) 유지
+- 문서/코드 동일 파라미터 키(`T_warn_base`, `k_steer`, `T_recover`) 유지
 
 ---
 
-## 11) 참고문헌
+## 12) 참고문헌
 
 [^s1]: Simons-Morton et al., *Keep Your Eyes on the Road: Young Driver Crash Risk Increases According to Duration of Distraction*, J Adolesc Health (PMCID: PMC3999409). https://pmc.ncbi.nlm.nih.gov/articles/PMC3999409/
 [^s2]: Liang et al., *How dangerous is looking away from the road?*, Human Factors, PMID: 23397818. https://pubmed.ncbi.nlm.nih.gov/23397818/

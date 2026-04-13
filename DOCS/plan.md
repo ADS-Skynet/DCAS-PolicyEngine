@@ -114,7 +114,7 @@
   - speed/curvature가 위험할수록 동일 state에서도 더 보수적인 제한 적용
 - 출력:
   - HMI 액션(`HMI_WARN`, `BEEP_LEVEL_UP`)
-  - 제어 제한(`throttle_limit`, `steer_limit`)
+  - 제어 제한(`throttle_limit`)
   - 긴급 플래그(`rmf_request`)
 
 추가 원칙:
@@ -128,7 +128,6 @@
 - 정책엔진은 LKAS로부터 읽은 `curvature`, `throttle`, `steer`를 기준으로 제한값을 재계산한다.
 - 정책엔진은 재계산된 제한값을 DCAS output shared memory에 기록하고, vehicle-jetracer는 해당 채널을 읽는다.
 - LKAS 자체는 수정하지 않으며, DCAS는 LKAS output 채널을 읽고 DCAS output 채널에 최종값을 기록하는 방식으로 개입한다.
-  - `steering = clamp(steering, -steer_limit, +steer_limit)`
   - `throttle = min(throttle, throttle_limit)`
   - `if emergency: throttle = 0` (브레이크 미장착 대체)
 - `Vehicle-jetracer`는 수정하지 않으며, DCAS가 덮어쓴 최종 control 값을 그대로 읽어 actuation 한다.
@@ -366,9 +365,8 @@ class StateMachine {
 ```python
 # conceptual pseudo-code only
 control = controller.process_detection(detection)
-limit = dcas_limit_subscriber.latest()  # throttle_limit, steer_limit, emergency
+limit = dcas_limit_subscriber.latest()  # throttle_limit, emergency
 
-control.steering = max(-limit.steer_limit, min(limit.steer_limit, control.steering))
 control.throttle = min(limit.throttle_limit, control.throttle)
 if limit.emergency:
     control.throttle = 0.0
@@ -384,7 +382,6 @@ if limit.emergency:
   "actions": ["HMI_WARN", "THROTTLE_LIMIT"],
   "limits": {
     "throttle_limit": 0.08,
-    "steer_limit": 0.20,
     "emergency": false
   },
   "reason_codes": ["eyes_off_timeout", "vlm_phone"]
@@ -413,17 +410,17 @@ if limit.emergency:
 ## 6.2 출력: `dcas.state.v1`
 
 - 필수: `driver_state`, `dcas_state`, `actions`, `reason_codes`
-- 제어제한: `limits.throttle_limit`, `limits.steer_limit`, `limits.emergency`
+- 제어제한: `limits.throttle_limit`, `limits.emergency`
 
 ## 6.2.1 LKAS 제한 출력: `lkas.limit.v1`
 
-- 필수: `seq`, `throttle_limit`, `steer_limit`, `emergency`, `ttl_ms`
+- 필수: `seq`, `throttle_limit`, `emergency`, `ttl_ms`
 - 추가 필드(선택): `source_curvature`, `source_throttle`, `source_steer`
 - 목적: LKAS가 만든 현재 주행 상태를 반영하여 제한값을 더 정교하게 적용
 
 ## 6.3 LKAS 제한 채널: `lkas.limit.v1`
 
-- 필수: `seq`, `throttle_limit`, `steer_limit`, `emergency`, `ttl_ms`
+- 필수: `seq`, `throttle_limit`, `emergency`, `ttl_ms`
 - 적용 정책: TTL 만료 시 LKAS는 마지막 제한값 무효화 또는 fail-safe fallback
 
 ---
@@ -470,17 +467,17 @@ if limit.emergency:
 
 ## 8.3 LKAS 제한 테스트
 
-- throttle/steer clamp 정상 적용
+- throttle clamp 정상 적용
 - emergency 시 throttle 0 강제
 - TTL 만료 시 제한 무효 처리
-- curvature/throttle/steer 입력에 따라 제한값이 더 보수적으로 바뀌는지 확인
+- curvature/throttle 입력에 따라 제한값이 더 보수적으로 바뀌는지 확인
 
 ## 8.4 목표 맥락별 E2E 동작 테스트 (5월 첫째 주 목표)
 
 - 맥락 1: `기본(정상)`
   - 기대: 상태 `OK`, 과제한 없음, 정상 주행 유지
 - 맥락 2: `졸음(drowsy)`
-  - 기대: 경고 상승 + 보수적 throttle/steer 제한 적용
+  - 기대: 경고 상승 + 보수적 throttle 제한 적용
 - 맥락 3: `폰(phone)`
   - 기대: 경고 강화 + 제한 단계 진입
 - 맥락 4: `의식 없음(unresponsive/absent)`
@@ -504,7 +501,7 @@ if limit.emergency:
 ### Phase 2 (다음 주): E2E 파이프라인 연결
 
 - LKAS output SHM 읽기 + DCAS output SHM 쓰기 파이프라인 연결
-- `curvature/throttle/steer` 반영 정책 매핑 초기 버전 적용
+- `curvature/throttle` 반영 정책 매핑 초기 버전 적용
 - 대시보드 출력 필드(`driver_state`, `dcas_state`, `reason_codes`) 연결
 
 ### Phase 3 (5월 첫째 주 직전): 4맥락 안정화
@@ -575,7 +572,7 @@ if limit.emergency:
 ### 11.5 안전/대체 전략 확정 (브레이크 미장착 조건)
 
 - 완료 기준:
-  - emergency 시 대체 동작(`throttle=0`, `steer_limit 강화`, HMI 강화 경고) 확정
+  - emergency 시 대체 동작(`throttle=0`, HMI 강화 경고) 확정
   - fail-open/fail-safe 정책(입력 단절/지연 시 동작) 확정
 - 증빙 산출물:
   - `DOCS/state-machine-v1.md`의 emergency/fallback 규칙
