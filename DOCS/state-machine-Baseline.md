@@ -25,7 +25,9 @@
 - 필수 입력
   - `is_attentive` (`yes/no`)  
     - 인지팀에서 실시간으로 전송하는 운전자 집중 여부
-  - `vehicle_speed_kmh`
+  - `jetracer_input_0_4`
+    - JetRacer 런타임 입력값(범위 `0.0 ~ 0.4`)
+    - 물리적 `km/h`가 아니라 주행 맥락용 정규화 입력이다
   - `lkas_steer_abs` (`|steering|`, 범위 `0.0 ~ 0.65`)
   - `current_state`
 - 선택 입력
@@ -33,6 +35,8 @@
     - 외부에서 주는 값이 아니라 Step B 내부 누적 타이머(기본)
   - `warning_elapsed` (WARNING 상태 체류시간)
   - `input_stale` (센서 stale/파싱 실패 플래그)
+  - `road_curvature`
+    - LKAS가 제공하는 현재 주행 커브 맥락(있으면 사용, 없으면 `lkas_steer_abs`로 대체)
   - `vlm_context` (노트북 VLM 후행 결과, optional)
 
 ### 2.2 출력
@@ -47,9 +51,10 @@
 ### 2.3 band 경계값 정의 (스케일카 기준)
 
 > 경계값도 기준선의 일부로 고정하며, 플랫폼별 튜닝 시 버전 태깅하여 변경한다.
+> 문서상 이름은 `speed_band`를 유지하지만, 실제 계산 입력은 JetRacer의 `0.0 ~ 0.4` 정규화 입력이다.
 
 - `speed_band`는 정규화 속도로 정의
-  - `rho_v = vehicle_speed_kmh / V_safe_max_kmh`
+  - `rho_v = jetracer_input_0_4 / 0.4`
   - `LOW`: `rho_v < 0.30`
   - `MID`: `0.30 <= rho_v < 0.65`
   - `HIGH`: `rho_v >= 0.65`
@@ -71,6 +76,11 @@
 - 구현 순서(고정)
   - `rho_v_raw` 계산 -> LPF -> 히스테리시스 + dwell -> `speed_band` 결정
   - 임계시간 계산(`T_warn_eff`, `T_unresp_eff`, `T_absent_eff`)은 안정화된 `speed_band`만 사용
+
+- `speed_band`의 역할
+  - 경고/복귀 기준을 직접 결정하는 값이 아니라, 현재 주행 맥락의 거칠기(level)를 나누는 보조 축이다.
+  - 주행 입력이 강하고 조향 부하가 큰 구간은 더 보수적인 임계시간을 쓰기 위한 분류용이다.
+  - 실제 판단의 주축은 여전히 `is_attentive`와 그 지속시간(`inattentive_elapsed` / `recover_elapsed`)이다.
 
 - `steer_band`는 정규화 조향으로 정의
   - `rho_s = lkas_steer_abs / 0.65`
@@ -108,19 +118,29 @@
 
 ---
 
-## 4) 보정계수 및 적용식
+### 4) 보정계수 및 적용식
 
 - 스티어 보정: `k_steer`
   - `LOW`: `1.00`
   - `MID`: `0.90`
   - `HIGH`: `0.80`
-- 상태 보정: 이미 `WARNING`이면 `k_state = 0.85`, 아니면 `1.0`
+  - `road_curvature`가 있으면 `lkas_steer_abs`와 함께 커브 부하 추정에 사용한다.
+- 맥락 보정: `k_context`
+  - `LOW`: `1.00`
+  - `MID`: `0.90`
+  - `HIGH`: `0.80`
 
 적용식:
 
-- `T_warn_eff = T_warn_base(speed_band) * k_steer * k_state`
-- `T_unresp_eff = T_unresp_base(speed_band) * k_steer`
-- `T_absent_eff = T_absent_base(speed_band) * k_steer`
+- `T_warn_eff = T_warn_base(speed_band) * k_context * k_steer`
+- `T_unresp_eff = T_unresp_base(speed_band) * k_context * k_steer`
+- `T_absent_eff = T_absent_base(speed_band) * k_context * k_steer`
+
+해석:
+
+- `T_warn_eff`는 `OK -> WARNING`에만 사용한다.
+- `WARNING` 이후에는 더 짧은 `T_warn_eff`를 다시 쓰는 것이 아니라, `T_unresp_eff`와 `T_absent_eff`를 사용한다.
+- 따라서 `WARNING` 상태 자체에 `T_warn`를 다시 깎는 구조는 쓰지 않는다.
 
 안전 하한:
 
@@ -142,13 +162,13 @@
 | OK | `inattentive_elapsed >= T_warn_eff` | WARNING |
 | WARNING | `inattentive_elapsed >= T_unresp_eff` | UNRESPONSIVE |
 | UNRESPONSIVE | `inattentive_elapsed >= T_absent_eff` | ABSENT |
-| WARNING/UNRESPONSIVE/ABSENT | `is_attentive=yes`가 `T_recover` 이상 연속 유지 | 한 단계 하향 |
+| WARNING/UNRESPONSIVE/ABSENT | `is_attentive=yes`가 `T_recover` 이상 연속 유지 | OK |
 | ANY | `input_stale=true` 또는 입력 누락 | stale fail-safe 규칙 적용 |
 
 보조 규칙:
 
 - 단일 프레임 `is_attentive=yes`로 즉시 복귀 금지
-- 복귀는 항상 단계적으로만 수행
+- 복귀는 `T_recover` 동안 안정적으로 유지될 때만 OK로 복귀
 
 ### 5.1 WARNING 시 노트북 VLM 호출 흐름
 
@@ -165,22 +185,23 @@ VLM은 WARNING 이후 맥락 보강 계층이다.
 
 ### 5.2 복귀 시 타이머 처리(명시)
 
-복귀 시 `inattentive_elapsed`를 0으로 즉시 초기화하지 않는다.
+복귀 시 `inattentive_elapsed`를 `is_attentive=yes`가 들어왔다고 바로 0으로 만들지 않는다.
 
-- 보조 상수:
-  - `Delta_down = max(0.3s, 0.1 * T_warn_eff)`
-  - `T_clear = 3.0s` (연속 eyes-on 완전 리셋 기준)
+권장 타이머 분리:
 
-단계 하향 직후 처리:
+- `inattentive_elapsed`: `is_attentive=no`일 때만 누적
+- `recover_elapsed`: `is_attentive=yes`가 연속 유지되는 시간 누적
 
-- `UNRESPONSIVE -> WARNING` 시:
-  - `inattentive_elapsed = min(inattentive_elapsed, T_unresp_eff - Delta_down)`
-- `WARNING -> OK` 시:
-  - `inattentive_elapsed = min(inattentive_elapsed, T_warn_eff - Delta_down)`
+처리 규칙:
 
-완전 리셋 조건:
+- `is_attentive=no`가 들어오면 `recover_elapsed = 0`
+- `is_attentive=yes`가 들어오면 `recover_elapsed`를 누적하고 `inattentive_elapsed`는 유지
+- `recover_elapsed >= T_recover`가 되면 `next_state = OK`로 복귀하고 `inattentive_elapsed = 0`, `recover_elapsed = 0`
 
-- `is_attentive=yes`가 연속 `T_clear` 이상 유지되면 `inattentive_elapsed = 0`으로 리셋
+주의:
+
+- HMI 버튼, 차량 actuation, 기타 비인지 입력은 `is_attentive`를 대체하지 않는다.
+- 주의 상태는 오직 인지팀의 `is_attentive` 스트림으로만 판정한다.
 
 의도:
 
@@ -293,8 +314,7 @@ VLM은 WARNING 이후 맥락 보강 계층이다.
 | speed band별 단축 | LOW > MID > HIGH | 맥락/시나리오/속도에 따라 주의여유 변화[^s5][^s6] | 맥락 의존 정책화 |
 | `T_unresponsive`, `T_absent` 단계 | 단계형 상승 | eyes-off와 lane-keeping 저하 연계[^s7], 경고 단계 시험체계[^s8][^s9][^s12] | 성능 저하 + 시험 구조 |
 | `k_steer` | `LOW/MID/HIGH=1.0/0.9/0.8` | 고부하 상황에서 보수화 필요 경향[^s5][^s6] | 맥락 보정 |
-| `k_state` | `0.85` | 지속 disengagement 빠른 대응 필요(운영 가정)[^s8][^s10] | 운영 설계 |
-| `T_recover` | 단계적 복귀 | 최소 재참여 시간 요구(200ms)[^s10] | 재참여 안정화 |
+| `T_recover` | OK 직접 복귀 | 최소 재참여 시간 요구(200ms)[^s10] | 재참여 안정화 |
 | speed/steer 경계값 | `rho_v`, `rho_s` band 경계 | 맥락 의존 연구 + 스케일카 정규화 전략[^s5][^s6] | 기준선 경계(B/C) |
 | `T_warn_eff` 상한 | `<=5.0s` clamp | UNECE EOR 5s 앵커 보호[^s10] | 규정 방어 로직 |
 | stale fail-safe | `OK->WARNING`, `WARNING+`는 freeze | 규정 경고전략 + 안전 우선[^s8][^s10] | 안전 원칙 |
@@ -319,7 +339,7 @@ VLM은 WARNING 이후 맥락 보강 계층이다.
 | speed/steer 경계값(`rho_v`, `rho_s`) | 가정값(캘리브레이션) | B | 스케일카 정규화 경계(변경 시 버전관리) |
 | `T_unresponsive`, `T_absent` | 가정값(캘리브레이션) | B | 단계형 경고 설계 + 시험체계 정합[^s7][^s12] |
 | `k_steer` | 가정값(캘리브레이션) | B | 조향 부하 보수화 |
-| `k_state`, `T_warn_eff` 하한 | 가정값(캘리브레이션) | C | 운영 안정성 가정 |
+| `k_context`, `T_warn_eff` 하한 | 가정값(캘리브레이션) | C | 운영 안정성 가정 |
 | `T_warn_eff` 상한 clamp(`<=5.0s`) | 확정규칙(규정보호) | A | UNECE EOR 5s 위반 방지 |
 | stale 시 `OK->WARNING`, `WARNING+` freeze | 확정규칙(안전원칙) | B | 안전 우선 |
 
