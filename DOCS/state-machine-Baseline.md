@@ -14,7 +14,7 @@
 
 - 목적: 운전자 참여 상태를 `OK -> WARNING -> UNRESPONSIVE -> ABSENT`로 전이
 - 범위: 상태 계산(타이머, 임계값, 보정계수, 히스테리시스, fail-safe)
-- 비범위: throttle/steer 제한, HMI 상세 정책(별도 Step C 문서)
+- 비범위: throttle/steer 제한, HMI 상세 정책, ABSENT 진입 시 MRM 활성화 (= Step C 문서)
 
 ---
 
@@ -169,6 +169,7 @@
 
 - 단일 프레임 `is_attentive=yes`로 즉시 복귀 금지
 - 복귀는 `T_recover` 동안 안정적으로 유지될 때만 OK로 복귀
+- ABSENT 진입 시 Step C(제어 정책)에서 즉시 MRM 감속 모드 활성화 (본 문서 범위 밖)
 
 ### 5.1 WARNING 시 노트북 VLM 호출 흐름
 
