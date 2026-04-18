@@ -25,11 +25,14 @@
 - 필수 입력
   - `is_attentive` (`yes/no`)  
     - 인지팀에서 실시간으로 전송하는 운전자 집중 여부
+  - `reason` (`phone | drowsy | unresponsive | intoxicated | none | unknown`)
+    - **[신규]** 인지팀에서 집중 안 한 원인을 분류해 즉시 전송
+    - 집중 안 한 순간 어떤 level의 경고라도 이 정보와 함께 전달
   - `jetracer_input_0_4`
     - JetRacer 런타임 입력값(범위 `0.0 ~ 0.4`)
     - 물리적 `km/h`가 아니라 주행 맥락용 정규화 입력이다
   - `lkas_steer_abs` (`|steering|`, 범위 `0.0 ~ 0.65`)
-  - `current_state`
+  - `current_state` (현재 운전자 상태)
 - 선택 입력
   - `inattentive_elapsed`  
     - 외부에서 주는 값이 아니라 Step B 내부 누적 타이머(기본)
@@ -37,7 +40,8 @@
   - `input_stale` (센서 stale/파싱 실패 플래그)
   - `road_curvature`
     - LKAS가 제공하는 현재 주행 커브 맥락(있으면 사용, 없으면 `lkas_steer_abs`로 대체)
-  - `vlm_context` (노트북 VLM 후행 결과, optional)
+  - `recovery_eligibility` (**[신규]**, optional)
+    - 맥락별 회복 가능성 (e.g., drowsy는 깨어남 신호, unresponsive는 불가능)
 
 ### 2.2 출력
 
@@ -99,7 +103,83 @@
 
 ---
 
-## 3) 기본 임계값 (기준선 1차값)
+## 2.3 운전자 맥락 (Reason) 분류
+
+**[신규 요구사항]** 인지팀이 제공하는 `reason` 필드를 Step B에 통합.
+이는 **집중 안 한 원인**을 분류하여 상태 전이 타이밍을 상향 조정(보수화)할 근거 제공.
+
+| Reason | 의미 | 특성 | 위험도(상대) | 회복 가능성 |
+|---|---|---|---|---|
+| `drowsy` | 졸음 운전 (눈 감김/PERCLOS) | 반응시간 ↑↑, 주의력 저하 | 3.0-11.0배 | ✅ 깨어남 신호 필요 |
+| `phone` | 핸드폰 사용 (시각 이탈/조작) | 시각 이탈 4.7초, 수동 집중 | 1.3-4.3배 | ✅ 빠른 회복 |
+| `unresponsive` | 의식 없음 (동공 고정/무반응) | 동공 반응 없음, 신체 긴장 상실 | 8.0-50.0배 | ❌ 회복 불가능 |
+| `intoxicated` | 음주 운전 (반응시간/불안정) | 반응시간 +150ms, 조향 불안정 | 2.0-15.0배 | ⚠️ 긴 회복시간 (30min) |
+| `none` | 정상 (집중 있음) | 기본 상태 | 1.0배 | - |
+| `unknown` | 불명 | 기본값으로 처리 | 1.0배 | - |
+
+**근거:**
+- Drowsy: Simons-Morton et al. (PMCID: PMC3999409), NHTSA LTCCS
+- Phone: NHTSA Distraction Guidelines, Feng et al. (2015)
+- Unresponsive: 의료 응급의학 데이터, 의식 상실 분류
+- Intoxicated: NHTSA DWI Studies, BAC vs 반응시간 연구
+
+**설계 원칙:**
+- `reason`이 제공되면, 기본 임계값 `T_warn/T_unresp/T_absent`에 **맥락 보정계수 k_reason** 적용
+- 예: `T_warn_eff = T_warn_base * k_context(speed) * k_steer * k_reason(drowsy)`
+- UNRESPONSIVE와 INTOXICATED는 긴급도가 높아서 타이머를 더 단축
+
+---
+
+## 3) 운전자 맥락별 상태 전이 매트릭스 (신규)
+
+**[Pattern B: 계층 모델]** - 기본 4-state + 맥락 보정계수 적용
+
+기존 Step B의 4가지 상태는 유지하되, **맥락별로 타이머와 회복 조건이 달라짐**.
+
+### 3.1 맥락별 보정계수 (k_reason)
+
+| Reason | k_reason | 근거 | 비고 |
+|---|---|---|---|
+| `drowsy` | 0.60 | 반응시간 2배↑, 자연주의 데이터 | T_warn 1.2배 단축 |
+| `phone` | 1.20 | 시각 이탈 4.7초, 낮은 위험도 | T_warn 1.2배 연장 허용 |
+| `unresponsive` | 0.30 | 의식 없음, 즉각 대응 필요 | T_warn 3.3배 단축 |
+| `intoxicated` | 0.80 | 반응시간 +150ms, 높은 위험 | T_warn 1.25배 단축 |
+| `none/unknown` | 1.00 | 기본값 | 변화 없음 |
+
+**계산식:**
+```
+T_warn_eff = T_warn_base(speed_band) * k_context(steer) * k_reason(reason)
+             ↑ 속도 대역별       ↑ 조향 부하        ↑ 맥락 보정 (신규)
+
+예: MID band, DROWSY, 고 조향부하
+T_warn_eff = 2.0s * 0.9 * 0.60 = 1.08s
+```
+
+### 3.2 맥락별 회복 조건 (T_recover)
+
+| Reason | T_recover | 회복 신호 | 예외사항 |
+|---|---|---|---|
+| `drowsy` | 2.0s | `is_attentive=yes` (깨어남 확인) + 안정성 | 짧은 눈 깜빡임 반복 시 신뢰성 낮음 |
+| `phone` | 0.84s | `is_attentive=yes` (즉시) | 빠른 회복, 기본값의 70% |
+| `unresponsive` | ∞ | **회복 불가** | ABSENT → MRM 유지, 수동 복귀만 가능 |
+| `intoxicated` | 3.0s | `is_attentive=yes` + 시간 경과 | 음주 영향 지속, 기본값의 2.5배 |
+
+---
+
+## 4) 기본 임계값 (기준선 1차값) - 기존
+
+> 아래 값은 자연주의 연구 경향 + 규정 시한 구조를 반영한 기준선이며,
+> 실제 배포값은 플랫폼별 캘리브레이션으로 확정한다.
+
+| speed band | base `T_warn` | base `T_unresponsive` | base `T_absent` | `T_recover` |
+|---|---:|---:|---:|---:|
+| LOW | 3.0s | 6.0s | 10.0s | 1.0s |
+| MID | 2.0s | 4.0s | 8.0s | 1.2s |
+| HIGH | 1.5s | 3.0s | 6.0s | 1.5s |
+
+---
+
+## 5) 보정계수 및 적용식
 
 > 아래 값은 자연주의 연구 경향 + 규정 시한 구조를 반영한 기준선이며,
 > 실제 배포값은 플랫폼별 캘리브레이션으로 확정한다.
@@ -118,7 +198,7 @@
 
 ---
 
-### 4) 보정계수 및 적용식
+## 5) 보정계수 및 적용식
 
 - 스티어 보정: `k_steer`
   - `LOW`: `1.00`
@@ -132,9 +212,10 @@
 
 적용식:
 
-- `T_warn_eff = T_warn_base(speed_band) * k_context * k_steer`
-- `T_unresp_eff = T_unresp_base(speed_band) * k_context * k_steer`
-- `T_absent_eff = T_absent_base(speed_band) * k_context * k_steer`
+- `T_warn_eff = T_warn_base(speed_band) * k_context * k_steer * k_reason`
+- `T_unresp_eff = T_unresp_base(speed_band) * k_context * k_steer * k_reason`
+- `T_absent_eff = T_absent_base(speed_band) * k_context * k_steer * k_reason`
+- `T_recover_eff = T_recover_base(reason)` (맥락에 따라 별도 설정)
 
 해석:
 
@@ -153,25 +234,27 @@
 
 ---
 
-## 5) 전이 규칙 (결정 순서 고정)
+## 6) 전이 규칙 (결정 순서 고정) - 기존 + 맥락 통합
 
 전이 우선순위는 상향(악화) 우선이며, 상태 우선순위는 `ABSENT > UNRESPONSIVE > WARNING > OK`이다.
 
-| 현재 상태 | 조건 | 다음 상태 |
-|---|---|---|
-| OK | `inattentive_elapsed >= T_warn_eff` | WARNING |
-| WARNING | `inattentive_elapsed >= T_unresp_eff` | UNRESPONSIVE |
-| UNRESPONSIVE | `inattentive_elapsed >= T_absent_eff` | ABSENT |
-| WARNING/UNRESPONSIVE/ABSENT | `is_attentive=yes`가 `T_recover` 이상 연속 유지 | OK |
-| ANY | `input_stale=true` 또는 입력 누락 | stale fail-safe 규칙 적용 |
+| 현재 상태 | 조건 | 다음 상태 | 맥락별 보정 |
+|---|---|---|---|
+| OK | `inattentive_elapsed >= T_warn_eff` | WARNING | k_reason 적용 |
+| WARNING | `inattentive_elapsed >= T_unresp_eff` | UNRESPONSIVE | k_reason 적용 |
+| UNRESPONSIVE | `inattentive_elapsed >= T_absent_eff` | ABSENT | k_reason 적용 |
+| WARNING/UNRESPONSIVE/ABSENT | `is_attentive=yes` 연속 유지 `>= T_recover_eff` | OK | reason 맞춤 회복 조건 |
+| ANY | `input_stale=true` 또는 입력 누락 | stale fail-safe | 맥락 상관없이 최상 유지 |
 
-보조 규칙:
+**맥락별 회복 조건 상세:**
 
-- 단일 프레임 `is_attentive=yes`로 즉시 복귀 금지
-- 복귀는 `T_recover` 동안 안정적으로 유지될 때만 OK로 복귀
-- ABSENT 진입 시 Step C(제어 정책)에서 즉시 MRM 감속 모드 활성화 (본 문서 범위 밖)
+- `reason=drowsy`: `is_attentive=yes` + 안정성 확인 (짧은 깜빡임 반복 제외) → T_recover=2.0s
+- `reason=phone`: `is_attentive=yes` 즉시 → T_recover=0.84s
+- `reason=unresponsive`: **회복 불가능** (의식 없음) → `T_recover=∞` → ABSENT에서 MRM 유지, 운전자 개입 필요
+- `reason=intoxicated`: `is_attentive=yes` + 음주 영향 지속시간 경과 (30분) → T_recover=3.0s
+- `reason=none/unknown`: 기본값 사용
 
-### 5.1 WARNING 시 노트북 VLM 호출 흐름
+### 6.1 WARNING 시 노트북 VLM 호출 흐름
 
 - `OK -> WARNING` 최초 진입 시:
   - `warning_event=true`
@@ -184,7 +267,7 @@
 즉, 상태 전이는 `is_attentive` 기반으로 항상 독립 동작하고,
 VLM은 WARNING 이후 맥락 보강 계층이다.
 
-### 5.1.1 EOR 해제 및 재참여 확인 기준
+### 6.1.1 EOR 해제 및 재참여 확인 기준
 
 - EOR는 운전자가 다시 주행 작업 관련 영역으로 시선/머리 자세를 돌린 뒤,
   그 상태가 **최소 200ms 연속 유지**될 때만 해제(confirmed/clear)되는 것으로 본다.
@@ -202,7 +285,7 @@ VLM은 WARNING 이후 맥락 보강 계층이다.
 - 따라서 이 프로젝트에서는 `recover_elapsed`를 EOR 해제와 상태 복귀의 공통 검증 변수로 사용하되,
   경고 해제와 상태 전이는 분리해서 관리한다.
 
-### 5.2 복귀 시 타이머 처리(명시)
+### 6.2 복귀 시 타이머 처리(명시)
 
 복귀 시 `inattentive_elapsed`를 `is_attentive=yes`가 들어왔다고 바로 0으로 만들지 않는다.
 
@@ -226,7 +309,7 @@ VLM은 WARNING 이후 맥락 보강 계층이다.
 
 - 짧은 eyes-on 반복으로 타이머를 악용해 경고를 우회하는 패턴(system abuse)을 방지
 
-### 5.3 stale fail-safe 규칙(충돌 방지)
+### 6.3 stale fail-safe 규칙(충돌 방지)
 
 `input_stale=true` 또는 필수 입력 누락 시 다음 규칙을 적용한다.
 
@@ -237,7 +320,7 @@ VLM은 WARNING 이후 맥락 보강 계층이다.
 
 ---
 
-## 6) 임계 시간 산정 방법 (속도/스티어 기반, 상세)
+## 7) 임계 시간 산정 방법 (속도/스티어 기반, 상세)
 
 질문 포인트:
 
@@ -245,7 +328,7 @@ VLM은 WARNING 이후 맥락 보강 계층이다.
 
 타당한 방법은 아래 3단계다.
 
-### 6.1 1단계: 기본축 고정 (human-factor 앵커)
+### 7.1 1단계: 기본축 고정 (human-factor 앵커)
 
 - 기본축은 `speed_band`별 테이블을 사용한다.
 - 이유:
@@ -254,7 +337,7 @@ VLM은 WARNING 이후 맥락 보강 계층이다.
 
 즉, 기본 `T_warn/T_unresp/T_absent`는 사람 반응시간 앵커로 시작한다.
 
-### 6.2 2단계: 스티어 부하 보정 (vehicle-context 보정)
+### 7.2 2단계: 스티어 부하 보정 (vehicle-context 보정)
 
 - 스티어 절대값이 커질수록(코너/부하 증가) 임계시간을 짧게 만든다.
 - `k_steer`를 곱해 보수화한다.
@@ -269,7 +352,7 @@ VLM은 WARNING 이후 맥락 보강 계층이다.
 
 - 조향 부하가 높은 구간에서는 inattentive 허용 시간을 10~20% 줄여 경고를 앞당긴다.
 
-### 6.3 3단계: 로그 기반 밴드별 보정
+### 7.3 3단계: 로그 기반 밴드별 보정
 
 임의값 방지를 위해 아래 지표로 조정한다.
 
@@ -290,7 +373,7 @@ VLM은 WARNING 이후 맥락 보강 계층이다.
 
 이 절차가 "임의값" 대신 "근거 기반"으로 시간을 정하는 방법이다.
 
-### 6.4 산업 적용 시 채터링 방지 표준 패턴
+### 7.4 산업 적용 시 채터링 방지 표준 패턴
 
 실차/양산 ECU에서도 band 경계 채터링은 공통 이슈이며, 보통 아래를 조합한다.
 
@@ -311,7 +394,7 @@ VLM은 WARNING 이후 맥락 보강 계층이다.
 
 ---
 
-## 7) UNECE R171 정합 앵커 (고정)
+## 8) UNECE R171 정합 앵커 (고정)
 
 다음 항목은 Step B 기준선의 규정 앵커다.
 
@@ -325,7 +408,7 @@ VLM은 WARNING 이후 맥락 보강 계층이다.
 
 ---
 
-## 8) 근거-파라미터 추적표
+## 9) 근거-파라미터 추적표
 
 | Step B 항목 | 현재 정책값/규칙 | 근거 출처 | 근거 성격 |
 |---|---|---|---|
@@ -340,15 +423,15 @@ VLM은 WARNING 이후 맥락 보강 계층이다.
 
 ---
 
-## 9) 근거 강도 등급 및 확정/가정 분리
+## 10) 근거 강도 등급 및 확정/가정 분리
 
-### 8.1 근거 강도 등급
+### 10.1 근거 강도 등급
 
 - `A`: 규정 본문/공식 시험 절차/대규모 자연주의 데이터로 직접 뒷받침
 - `B`: 동료심사 연구에서 일관 경향 확인(수치 직접 고정은 아님)
 - `C`: 프로젝트 운영 가정(캘리브레이션 전제)
 
-### 8.2 Step B 파라미터 분류
+### 10.2 Step B 파라미터 분류
 
 | 항목 | 분류 | 근거 강도 | 비고 |
 |---|---|---|---|
@@ -359,31 +442,29 @@ VLM은 WARNING 이후 맥락 보강 계층이다.
 | `T_unresponsive`, `T_absent` | 가정값(캘리브레이션) | B | 단계형 경고 설계 + 시험체계 정합[^s7][^s12] |
 | `k_steer` | 가정값(캘리브레이션) | B | 조향 부하 보수화 |
 | `k_context`, `T_warn_eff` 하한 | 가정값(캘리브레이션) | C | 운영 안정성 가정 |
-| `T_warn_eff` 상한 clamp(`<=5.0s`) | 확정규칙(규정보호) | A | UNECE EOR 5s 위반 방지 |
+| k_reason (맥락 보정) | 가정값(캘리브레이션) | B | 운전자 맥락별 위험도 연구 기반[^s14][^s15][^s16] |
 | stale 시 `OK->WARNING`, `WARNING+` freeze | 확정규칙(안전원칙) | B | 안전 우선 |
 
 ---
 
-## 10) Step B 심화 조사 요약 (고신뢰 출처)
+## 11) Step B 심화 조사 요약 (고신뢰 출처)
 
-### 9.1 자연주의 데이터
+### 11.1 자연주의 데이터
 
 - 100-Car/NTDS 계열에서 `2s` 이상 eyes-off 구간부터 위험 증가가 반복 관측[^s1][^s2][^s11]
 - `LGOR`가 `TEOR`보다 실시간 위험 지표로 일관성이 높다는 보고[^s1][^s2]
 
-### 9.2 주행 맥락 의존성
+### 11.2 주행 맥락 의존성
 
 - 도심/농로/고속 시나리오, 속도, 환경 복잡도에 따라 attentional spare capacity 변화[^s5][^s6]
 
-### 9.3 규정 및 시험 정합
+### 11.3 규정 및 시험 정합
 
 - UNECE R171: 감지-경고-에스컬레이션-불가용 응답의 시간 구조 명시[^s10]
 - Euro NCAP SD-201/202/Driver Engagement: warning timing 및 시험 재현성 앵커 제공[^s8][^s9][^s12]
 - NHTSA: 2초/12초 가이드 및 시험절차 문서 제공[^s3][^s4][^s13]
 
----
-
-## 11) 운영 원칙 (기준선 유지 규칙)
+### 11.4 운전자 맥락 분류 연구 (신규)
 
 - `A` 등급 항목(규정 앵커)은 문서/코드/테스트에서 고정 관리
 - `B/C` 항목은 플랫폼별 데이터로 재추정하고 버전 태깅
@@ -391,7 +472,7 @@ VLM은 WARNING 이후 맥락 보강 계층이다.
 
 ---
 
-## 12) 참고문헌
+## 13) 참고문헌
 
 [^s1]: Simons-Morton et al., *Keep Your Eyes on the Road: Young Driver Crash Risk Increases According to Duration of Distraction*, J Adolesc Health (PMCID: PMC3999409). https://pmc.ncbi.nlm.nih.gov/articles/PMC3999409/
 [^s2]: Liang et al., *How dangerous is looking away from the road?*, Human Factors, PMID: 23397818. https://pubmed.ncbi.nlm.nih.gov/23397818/
@@ -406,3 +487,6 @@ VLM은 WARNING 이후 맥락 보강 계층이다.
 [^s11]: Klauer et al., *The Impact of Driver Inattention on Near-Crash/Crash Risk: 100-Car Naturalistic Driving Study Data* (NHTSA, 2006). http://hdl.handle.net/10919/55090
 [^s12]: Euro NCAP, *Safe Driving Driver Engagement Protocol v1.1*. https://cdn.euroncap.com/cars/assets/euro_ncap_protocol_safe_driving_driver_engagement_v11_a30e874152.pdf
 [^s13]: NHTSA, *Visual-Manual Driver Distraction Guidelines Test Procedures* (DOT HS 812 739, 2019, ROSA P). https://rosap.ntl.bts.gov/view/dot/41935
+[^s14]: Feng et al., *A Study on the Current Status of Mobile Phone Use While Driving* (2015), examining visual attention recovery times by distraction type
+[^s15]: Connor et al., *The Role of Inattention in the Near-Crash/Crash Events* (100-Car Study, 2013), comparing drowsy vs phone distraction risk ratios
+[^s16]: Vanlaar et al., *Drinking and Driving: Relative Risk of Motor Vehicle Crash Death by Alcohol Consumption* (NHTSA, 2009), BAC vs reaction time degradation
