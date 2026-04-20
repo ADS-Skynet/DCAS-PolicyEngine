@@ -13,7 +13,7 @@
 ## 1) Step B 목적과 범위
 
 - 목적: 운전자 참여 상태를 `OK -> WARNING -> UNRESPONSIVE -> ABSENT`로 전이
-- 범위: 상태 계산(타이머, 임계값, 보정계수, 히스테리시스, fail-safe)
+- 범위: 상태 계산(타이머, 임계값, 히스테리시스, fail-safe)
 - 비범위: throttle/steer 제한, HMI 상세 정책, ABSENT 진입 시 MRM 활성화 (= Step C 문서)
 
 ---
@@ -47,10 +47,8 @@
 
 - `next_state`
 - `transition_reason`
-- `warning_event` (`true/false`)  
-  - `OK -> WARNING` 최초 진입 시 `true`
-- `vlm_request_hint` (`none|request_context`)  
-  - `warning_event=true`일 때 노트북 측 VLM 호출 트리거 힌트
+- `representative_reason` (Step C 전달용 대표 맥락)
+- `active_reason_set` (동시 다중 맥락 원본)
 
 ### 2.3 band 경계값 정의 (스케일카 기준)
 
@@ -80,11 +78,13 @@
 - 구현 순서(고정)
   - `rho_v_raw` 계산 -> LPF -> 히스테리시스 + dwell -> `speed_band` 결정
   - 임계시간 계산(`T_warn_eff`, `T_unresp_eff`, `T_absent_eff`)은 안정화된 `speed_band`만 사용
+  - `steer_band`/`road_curvature`는 모니터링/로그용으로만 사용하고, 전이 임계시간 보정에는 사용하지 않는다.
 
 - `speed_band`의 역할
   - 경고/복귀 기준을 직접 결정하는 값이 아니라, 현재 주행 맥락의 거칠기(level)를 나누는 보조 축이다.
   - 주행 입력이 강하고 조향 부하가 큰 구간은 더 보수적인 임계시간을 쓰기 위한 분류용이다.
   - 실제 판단의 주축은 여전히 `is_attentive`와 그 지속시간(`inattentive_elapsed` / `recover_elapsed`)이다.
+  - 커브 구간 추가 보정계수를 두지 않는 이유: LKAS가 커브에서 이미 속도를 낮추므로 위험도는 `speed_band`에 간접 반영된다.
 
 - `steer_band`는 정규화 조향으로 정의
   - `rho_s = lkas_steer_abs / 0.65`
@@ -103,7 +103,7 @@
 
 ---
 
-## 2.3 운전자 맥락 (Reason) 분류
+## 2.4 운전자 맥락 (Reason) 분류
 
 **[신규 요구사항]** 인지팀이 제공하는 `reason` 필드를 Step B에 통합.
 이는 **집중 안 한 원인**을 분류하여 상태 전이 타이밍을 상향 조정(보수화)할 근거 제공.
@@ -124,45 +124,69 @@
 - Intoxicated: NHTSA DWI Studies, BAC vs 반응시간 연구
 
 **설계 원칙:**
-- `reason`이 제공되면, 기본 임계값 `T_warn/T_unresp/T_absent`에 **맥락 보정계수 k_reason** 적용
-- 예: `T_warn_eff = T_warn_base * k_context(speed) * k_steer * k_reason(drowsy)`
-- UNRESPONSIVE와 INTOXICATED는 긴급도가 높아서 타이머를 더 단축
+- `reason`은 Step B에서 **즉시 상향 전이(critical)** 및 Step C 전달용 의미 신호로 사용한다.
+- `reason`은 Step B 타이머(`T_warn/T_unresp/T_absent`)를 보정하지 않는다.
+- 즉, 타이머 전이는 `is_attentive` 지속시간과 base 임계값으로만 결정한다.
+
+### 2.4.1 인지 입력 처리 규칙 (고정)
+
+인지팀 입력은 매 주기마다 아래 2개를 함께 수신한다고 가정한다.
+
+- `is_attentive` (`yes/no`)
+- `reason_set` (동시 복수 가능: `{phone, drowsy, unresponsive, intoxicated, ...}`)
+
+고정 규칙:
+
+1. DCAS의 기본 위험도 전이는 `inattentive_elapsed` 기반으로 계산한다.
+2. `critical reason`이 active이면 현재 상태와 무관하게 즉시 해당 위험 레벨로 상향 전이한다.
+3. `non-critical reason`은 즉시 상태 점프를 만들지 않고, `WARNING` 구간에서 지속 업데이트한다.
+4. `WARNING -> UNRESPONSIVE` 전이 시점의 대응(reason overlay/HMI 보강)은 **가장 최신 active reason set**으로 결정한다.
+
+`critical reason` 분류(기준선):
+
+- `unresponsive` -> 최소 `UNRESPONSIVE`로 즉시 상향
+- `intoxicated` -> 최소 `UNRESPONSIVE`로 즉시 상향(운영 정책상 보수)
+
+`non-critical reason` 분류(기준선):
+
+- `phone`, `drowsy`, `unknown`, `none`
+
+### 2.4.2 복수 맥락 동시 입력 규칙 (active set)
+
+인지팀이 동시에 2개 이상 맥락을 전송할 수 있으므로, Step B는 단일 reason이 아닌 `active_reason_set`으로 처리한다.
+
+- 매 주기 `active_reason_set`은 **이번 메시지에 포함된 reason들로 교체(replace)** 한다.
+- 이전 주기에 있던 reason이 이번 주기에 없으면, 해당 reason은 즉시 비활성(invalid)로 본다.
+- `active_reason_set`이 비어 있으면 `none`으로 정규화한다.
+- 동일 시점 다중 reason 충돌 시, 위험도 상위 reason을 대표 reason으로 선택한다.
+
+대표 reason 우선순위(기준선):
+
+`unresponsive > intoxicated > drowsy > phone > unknown > none`
+
+적용 원칙:
+
+- 상태 전이 판정은 `is_attentive/inattentive_elapsed`가 주축이다.
+- 단, `critical reason` active 시 즉시 상향 규칙이 타이머 규칙보다 우선한다.
+- Step C로 내려보내는 `reason`은 대표 reason 1개와 원본 `active_reason_set`을 함께 전달하는 것을 권장한다.
 
 ---
 
 ## 3) 운전자 맥락별 상태 전이 매트릭스 (신규)
 
-**[Pattern B: 계층 모델]** - 기본 4-state + 맥락 보정계수 적용
+**[Pattern B: 계층 모델]** - 기본 4-state + 맥락 의미 신호
 
-기존 Step B의 4가지 상태는 유지하되, **맥락별로 타이머와 회복 조건이 달라짐**.
+기존 Step B의 4가지 상태는 유지하되, 맥락은 아래 용도로만 사용한다.
 
-### 3.1 맥락별 보정계수 (k_reason)
+- critical 맥락 즉시 상향 전이
+- Step C/HMI 대응용 대표 reason 선택
+- 타이머 전이는 미보정(base 임계값 고정)
 
-| Reason | k_reason | 근거 | 비고 |
-|---|---|---|---|
-| `drowsy` | 0.60 | 반응시간 2배↑, 자연주의 데이터 | T_warn 1.2배 단축 |
-| `phone` | 1.20 | 시각 이탈 4.7초, 낮은 위험도 | T_warn 1.2배 연장 허용 |
-| `unresponsive` | 0.30 | 의식 없음, 즉각 대응 필요 | T_warn 3.3배 단축 |
-| `intoxicated` | 0.80 | 반응시간 +150ms, 높은 위험 | T_warn 1.25배 단축 |
-| `none/unknown` | 1.00 | 기본값 | 변화 없음 |
+### 3.2 복귀 규칙 가드 (핵심)
 
-**계산식:**
-```
-T_warn_eff = T_warn_base(speed_band) * k_context(steer) * k_reason(reason)
-             ↑ 속도 대역별       ↑ 조향 부하        ↑ 맥락 보정 (신규)
-
-예: MID band, DROWSY, 고 조향부하
-T_warn_eff = 2.0s * 0.9 * 0.60 = 1.08s
-```
-
-### 3.2 맥락별 회복 조건 (T_recover)
-
-| Reason | T_recover | 회복 신호 | 예외사항 |
-|---|---|---|---|
-| `drowsy` | 2.0s | `is_attentive=yes` (깨어남 확인) + 안정성 | 짧은 눈 깜빡임 반복 시 신뢰성 낮음 |
-| `phone` | 0.84s | `is_attentive=yes` (즉시) | 빠른 회복, 기본값의 70% |
-| `unresponsive` | ∞ | **회복 불가** | ABSENT → MRM 유지, 수동 복귀만 가능 |
-| `intoxicated` | 3.0s | `is_attentive=yes` + 시간 경과 | 음주 영향 지속, 기본값의 2.5배 |
+- 기본 복귀: `is_attentive=yes` 연속 유지 `>= T_recover_base`이면 `next_state=OK`
+- 예외 가드: `representative_reason=unresponsive`이면 복귀 규칙을 무시하고 상태 하향을 금지
+- 즉, `unresponsive` 판정이 active인 동안은 `UNRESPONSIVE/ABSENT -> OK` 전이를 허용하지 않는다.
 
 ---
 
@@ -179,49 +203,24 @@ T_warn_eff = 2.0s * 0.9 * 0.60 = 1.08s
 
 ---
 
-## 5) 보정계수 및 적용식
+## 5) 임계값 적용식
 
-> 아래 값은 자연주의 연구 경향 + 규정 시한 구조를 반영한 기준선이며,
-> 실제 배포값은 플랫폼별 캘리브레이션으로 확정한다.
-
-| speed band | base `T_warn` | base `T_unresponsive` | base `T_absent` | `T_recover` |
-|---|---:|---:|---:|---:|
-| LOW | 3.0s | 6.0s | 10.0s | 1.0s |
-| MID | 2.0s | 4.0s | 8.0s | 1.2s |
-| HIGH | 1.5s | 3.0s | 6.0s | 1.5s |
-
-설명:
-
-- 인지팀 입력은 `is_attentive` yes/no만 받는다.
-- Step B 내부에서 `is_attentive=no`가 지속된 시간을 `inattentive_elapsed`로 누적한다.
-- 전이는 `inattentive_elapsed`와 유효 임계시간 비교로 결정한다.
-
----
-
-## 5) 보정계수 및 적용식
-
-- 스티어 보정: `k_steer`
-  - `LOW`: `1.00`
-  - `MID`: `0.90`
-  - `HIGH`: `0.80`
-  - `road_curvature`가 있으면 `lkas_steer_abs`와 함께 커브 부하 추정에 사용한다.
-- 맥락 보정: `k_context`
-  - `LOW`: `1.00`
-  - `MID`: `0.90`
-  - `HIGH`: `0.80`
+- 프로토타입 v0 기준, Step B는 reason/맥락 기반 타이머 보정을 적용하지 않는다.
 
 적용식:
 
-- `T_warn_eff = T_warn_base(speed_band) * k_context * k_steer * k_reason`
-- `T_unresp_eff = T_unresp_base(speed_band) * k_context * k_steer * k_reason`
-- `T_absent_eff = T_absent_base(speed_band) * k_context * k_steer * k_reason`
-- `T_recover_eff = T_recover_base(reason)` (맥락에 따라 별도 설정)
+- `T_warn_eff = T_warn_base(speed_band)`
+- `T_unresp_eff = T_unresp_base(speed_band)`
+- `T_absent_eff = T_absent_base(speed_band)`
+- `T_recover_eff = T_recover_base` (기본 복귀 시간)
 
 해석:
 
 - `T_warn_eff`는 `OK -> WARNING`에만 사용한다.
 - `WARNING` 이후에는 더 짧은 `T_warn_eff`를 다시 쓰는 것이 아니라, `T_unresp_eff`와 `T_absent_eff`를 사용한다.
 - 따라서 `WARNING` 상태 자체에 `T_warn`를 다시 깎는 구조는 쓰지 않는다.
+- reason은 타이머 크기를 바꾸지 않으며, 즉시 상향 규칙과 Step C 전달 정보로만 사용한다.
+- `WARNING` 구간에서는 `active_reason_set`을 매 주기 갱신하고, `WARNING -> UNRESPONSIVE` 전이 순간의 최신 대표 reason으로 후속 대응을 결정한다.
 
 안전 하한:
 
@@ -240,32 +239,27 @@ T_warn_eff = 2.0s * 0.9 * 0.60 = 1.08s
 
 | 현재 상태 | 조건 | 다음 상태 | 맥락별 보정 |
 |---|---|---|---|
-| OK | `inattentive_elapsed >= T_warn_eff` | WARNING | k_reason 적용 |
-| WARNING | `inattentive_elapsed >= T_unresp_eff` | UNRESPONSIVE | k_reason 적용 |
-| UNRESPONSIVE | `inattentive_elapsed >= T_absent_eff` | ABSENT | k_reason 적용 |
-| WARNING/UNRESPONSIVE/ABSENT | `is_attentive=yes` 연속 유지 `>= T_recover_eff` | OK | reason 맞춤 회복 조건 |
+| ANY | `active_reason_set`에 critical reason 포함 | 즉시 `max(current_state, UNRESPONSIVE)` | 타이머 무관 즉시 상향 |
+| OK | `inattentive_elapsed >= T_warn_eff` | WARNING | reason 타이머 보정 없음 |
+| WARNING | `inattentive_elapsed >= T_unresp_eff` | UNRESPONSIVE | reason 타이머 보정 없음 |
+| UNRESPONSIVE | `inattentive_elapsed >= T_absent_eff` | ABSENT | reason 타이머 보정 없음 |
+| WARNING/UNRESPONSIVE/ABSENT | `200ms <= recover_elapsed < T_recover_eff` | 현재 상태 유지 | 재참여 확인(경고 해제 가능), 상태 하향 금지 |
+| WARNING/UNRESPONSIVE/ABSENT | `is_attentive=yes` 연속 유지 `>= T_recover_eff` | OK | 단, 아래 `unresponsive` 복귀 가드 우선 |
+| UNRESPONSIVE/ABSENT | `representative_reason == unresponsive` | 상태 유지(하향 금지) | **강제 가드: 복귀 불가** |
 | ANY | `input_stale=true` 또는 입력 누락 | stale fail-safe | 맥락 상관없이 최상 유지 |
 
-**맥락별 회복 조건 상세:**
+**복귀 규칙 상세:**
 
-- `reason=drowsy`: `is_attentive=yes` + 안정성 확인 (짧은 깜빡임 반복 제외) → T_recover=2.0s
-- `reason=phone`: `is_attentive=yes` 즉시 → T_recover=0.84s
-- `reason=unresponsive`: **회복 불가능** (의식 없음) → `T_recover=∞` → ABSENT에서 MRM 유지, 운전자 개입 필요
-- `reason=intoxicated`: `is_attentive=yes` + 음주 영향 지속시간 경과 (30분) → T_recover=3.0s
-- `reason=none/unknown`: 기본값 사용
+- 기본 복귀: `is_attentive=yes` 연속 유지 `>= T_recover_base`이면 `next_state=OK`
+- 예외 가드: `representative_reason=unresponsive`이면 복귀 규칙을 무시하고 상태 하향을 금지
+- 즉, `unresponsive` 판정이 active인 동안은 `UNRESPONSIVE/ABSENT -> OK` 전이를 허용하지 않는다.
 
-### 6.1 WARNING 시 노트북 VLM 호출 흐름
+### 6.1 맥락 수신 흐름 (인지팀 주도 VLM)
 
-- `OK -> WARNING` 최초 진입 시:
-  - `warning_event=true`
-  - `vlm_request_hint=request_context`
-  - 노트북은 이를 수신해 VLM 호출
-- 노트북은 VLM 결과(`reason/confidence`)를 후행으로 Jetson에 전송
-- Step B는 VLM 결과를 상태 전이의 필수 조건으로 사용하지 않으며,
-  Step C/HMI 보강 입력으로만 사용한다.
-
-즉, 상태 전이는 `is_attentive` 기반으로 항상 독립 동작하고,
-VLM은 WARNING 이후 맥락 보강 계층이다.
+- 인지팀이 운전자 `is_attentive=no`를 판단하면, 노트북 측에서 VLM을 직접 호출한다.
+- 노트북은 VLM 결과를 `reason_set`(및 confidence 메타)로 Step B에 전달한다.
+- Step B는 별도 호출 요청 신호를 보내지 않으며, 수신한 `reason_set`만 소비한다.
+- 상태 전이는 `is_attentive` 타이머 기반으로 독립 동작하고, `reason_set`은 즉시 상향/Step C 전달에 사용한다.
 
 ### 6.1.1 EOR 해제 및 재참여 확인 기준
 
@@ -284,6 +278,8 @@ VLM은 WARNING 이후 맥락 보강 계층이다.
   **재참여가 0.2초 이상 안정적으로 유지되어야 알림을 해제할 수 있다**는 뜻이다.
 - 따라서 이 프로젝트에서는 `recover_elapsed`를 EOR 해제와 상태 복귀의 공통 검증 변수로 사용하되,
   경고 해제와 상태 전이는 분리해서 관리한다.
+- 구체적으로 `recover_elapsed >= 200ms`에서 경고 해제(재참여 confirmed)는 가능하지만,
+  `recover_elapsed < T_recover_eff`인 동안 상태는 하향하지 않는다.
 
 ### 6.2 복귀 시 타이머 처리(명시)
 
@@ -298,7 +294,8 @@ VLM은 WARNING 이후 맥락 보강 계층이다.
 
 - `is_attentive=no`가 들어오면 `recover_elapsed = 0`
 - `is_attentive=yes`가 들어오면 `recover_elapsed`를 누적하고 `inattentive_elapsed`는 유지
-- `recover_elapsed >= T_recover`가 되면 `next_state = OK`로 복귀하고 `inattentive_elapsed = 0`, `recover_elapsed = 0`
+- `200ms <= recover_elapsed < T_recover_eff`이면 경고 해제만 허용하고 `next_state = current_state`를 유지
+- `recover_elapsed >= T_recover_eff`가 되면 `next_state = OK`로 복귀하고 `inattentive_elapsed = 0`, `recover_elapsed = 0`
 
 주의:
 
@@ -320,11 +317,11 @@ VLM은 WARNING 이후 맥락 보강 계층이다.
 
 ---
 
-## 7) 임계 시간 산정 방법 (속도/스티어 기반, 상세)
+## 7) 임계 시간 산정 방법 (속도 기반, 상세)
 
 질문 포인트:
 
-- "차량 속도/스티어링에 따라 다음 상태로 넘어가는 inattentive 임계시간이 달라져야 한다"
+- "차량 속도에 따라 다음 상태로 넘어가는 inattentive 임계시간이 달라져야 한다"
 
 타당한 방법은 아래 3단계다.
 
@@ -337,20 +334,11 @@ VLM은 WARNING 이후 맥락 보강 계층이다.
 
 즉, 기본 `T_warn/T_unresp/T_absent`는 사람 반응시간 앵커로 시작한다.
 
-### 7.2 2단계: 스티어 부하 보정 (vehicle-context 보정)
+### 7.2 2단계: 프로토타입 고정 적용 (맥락 타이머 보정 미적용)
 
-- 스티어 절대값이 커질수록(코너/부하 증가) 임계시간을 짧게 만든다.
-- `k_steer`를 곱해 보수화한다.
-
-권장 초기값:
-
-- `LOW`: `1.00`
-- `MID`: `0.90`
-- `HIGH`: `0.80`
-
-해석:
-
-- 조향 부하가 높은 구간에서는 inattentive 허용 시간을 10~20% 줄여 경고를 앞당긴다.
+- 프로토타입 v0에서는 reason/조향 부하에 따른 타이머 추가 보정을 사용하지 않는다.
+- `T_warn/T_unresp/T_absent`는 `speed_band` 기준 테이블을 그대로 사용한다.
+- 맥락(reason)은 즉시 상향 전이와 Step C 전달 신호로만 사용한다.
 
 ### 7.3 3단계: 로그 기반 밴드별 보정
 
@@ -415,7 +403,7 @@ VLM은 WARNING 이후 맥락 보강 계층이다.
 | `T_warn` 기준축 | MID 2.0s | `>2s` inattentive 지속 위험 증가[^s1][^s2], NHTSA 2s 원칙[^s3][^s4], 100-Car 보고서[^s11] | 정량 위험 + 가이드라인 |
 | speed band별 단축 | LOW > MID > HIGH | 맥락/시나리오/속도에 따라 주의여유 변화[^s5][^s6] | 맥락 의존 정책화 |
 | `T_unresponsive`, `T_absent` 단계 | 단계형 상승 | eyes-off와 lane-keeping 저하 연계[^s7], 경고 단계 시험체계[^s8][^s9][^s12] | 성능 저하 + 시험 구조 |
-| `k_steer` | `LOW/MID/HIGH=1.0/0.9/0.8` | 고부하 상황에서 보수화 필요 경향[^s5][^s6] | 맥락 보정 |
+| critical reason 즉시 상향 | `unresponsive/intoxicated` 시 즉시 `>=UNRESPONSIVE` | 응급/고위험 맥락 보수 운용 원칙 | 안전 우선 |
 | `T_recover` | OK 직접 복귀 | 최소 재참여 시간 요구(200ms)[^s10] | 재참여 안정화 |
 | speed/steer 경계값 | `rho_v`, `rho_s` band 경계 | 맥락 의존 연구 + 스케일카 정규화 전략[^s5][^s6] | 기준선 경계(B/C) |
 | `T_warn_eff` 상한 | `<=5.0s` clamp | UNECE EOR 5s 앵커 보호[^s10] | 규정 방어 로직 |
@@ -440,9 +428,8 @@ VLM은 WARNING 이후 맥락 보강 계층이다.
 | speed band 테이블 | 가정값(캘리브레이션) | B | 맥락 의존 연구 기반[^s5][^s6] |
 | speed/steer 경계값(`rho_v`, `rho_s`) | 가정값(캘리브레이션) | B | 스케일카 정규화 경계(변경 시 버전관리) |
 | `T_unresponsive`, `T_absent` | 가정값(캘리브레이션) | B | 단계형 경고 설계 + 시험체계 정합[^s7][^s12] |
-| `k_steer` | 가정값(캘리브레이션) | B | 조향 부하 보수화 |
-| `k_context`, `T_warn_eff` 하한 | 가정값(캘리브레이션) | C | 운영 안정성 가정 |
-| k_reason (맥락 보정) | 가정값(캘리브레이션) | B | 운전자 맥락별 위험도 연구 기반[^s14][^s15][^s16] |
+| reason 기반 타이머 보정 | **미사용(v0 고정)** | C | 맥락은 즉시 상향/의미 신호로만 사용 |
+| `T_warn_eff` 하한 | 가정값(캘리브레이션) | C | 운영 안정성 가정 |
 | stale 시 `OK->WARNING`, `WARNING+` freeze | 확정규칙(안전원칙) | B | 안전 우선 |
 
 ---
@@ -468,11 +455,11 @@ VLM은 WARNING 이후 맥락 보강 계층이다.
 
 - `A` 등급 항목(규정 앵커)은 문서/코드/테스트에서 고정 관리
 - `B/C` 항목은 플랫폼별 데이터로 재추정하고 버전 태깅
-- 문서/코드 동일 파라미터 키(`T_warn_base`, `k_steer`, `T_recover`) 유지
+- 문서/코드 동일 파라미터 키(`T_warn_base`, `T_unresp_base`, `T_absent_base`, `T_recover_base`) 유지
 
 ---
 
-## 13) 참고문헌
+## 12) 참고문헌
 
 [^s1]: Simons-Morton et al., *Keep Your Eyes on the Road: Young Driver Crash Risk Increases According to Duration of Distraction*, J Adolesc Health (PMCID: PMC3999409). https://pmc.ncbi.nlm.nih.gov/articles/PMC3999409/
 [^s2]: Liang et al., *How dangerous is looking away from the road?*, Human Factors, PMID: 23397818. https://pubmed.ncbi.nlm.nih.gov/23397818/
