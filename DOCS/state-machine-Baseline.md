@@ -38,12 +38,8 @@
   - `warning_elapsed` (WARNING 상태 체류시간)
   - `input_stale` (센서 stale/파싱 실패 플래그)
     - 프로토타입 v0에서는 사용하지 않으며, 런타임에서 항상 `false`로 취급
-  - `lkas_steer_abs` (`|steering|`, 범위 `0.0 ~ 0.65`)
-    - 정책 전이 계산에는 사용하지 않고, 시스템 기동/상태 표시 및 로그 용도로만 사용
   - `road_curvature`
     - LKAS가 제공하는 현재 주행 커브 맥락(정책 전이 미사용, 상태 표시/로그 용도)
-  - `recovery_eligibility` (**[신규]**, optional)
-    - 맥락별 회복 가능성 (e.g., drowsy는 깨어남 신호, unresponsive는 불가능)
 
 ### 2.2 출력
 
@@ -88,16 +84,10 @@
   - 실제 판단의 주축은 여전히 `is_attentive`와 그 지속시간(`inattentive_elapsed` / `recover_elapsed`)이다.
   - 커브 구간 추가 보정계수를 두지 않는 이유: LKAS가 커브에서 이미 속도를 낮추므로 위험도는 `speed_band`에 간접 반영된다.
 
-- `steer_band`는 상태표시/로그 참고용으로만 정의
-  - `rho_s = lkas_steer_abs / 0.65`
-  - `LOW`: `rho_s < 0.30`
-  - `MID`: `0.30 <= rho_s < 0.65`
-  - `HIGH`: `rho_s >= 0.65`
 
 초기 스케일카 권장:
 
 - `V_safe_max_kmh`: 스케일카 직선 안전최대속도(측정값)
-- `lkas_steer_abs`는 LKAS 주행 시 관측 범위 `0.0 ~ 0.65`를 사용
 
 주의:
 
