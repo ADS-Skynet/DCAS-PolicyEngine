@@ -32,7 +32,9 @@ Step B 상태(`OK -> WARNING -> UNRESPONSIVE -> ABSENT`)를 입력받아,
 ### 2.1 입력
 
 - `driver_state`: `OK | WARNING | UNRESPONSIVE | ABSENT`
-- `reason`: `phone | drowsy | unresponsive | intoxicated | none | unknown`
+- `reason`: `phone | drowsy | unresponsive | intoxicated | none | unknown` (대표 맥락, fallback)
+- `active_reason_set` (optional): 동시 다중 맥락 원본 집합
+- `representative_reason` (optional): Step B가 계산한 대표 맥락
 - `lkas_throttle`: LKAS가 요청한 원시 종방향 제어값
 - `input_stale`: 센서/파싱 stale (**프로토타입 v0에서는 미사용, 예약 필드**)
 - `aeb_active` (optional): 긴급 제동/충돌회피 시스템 활성 상태
@@ -49,8 +51,17 @@ Step B 상태(`OK -> WARNING -> UNRESPONSIVE -> ABSENT`)를 입력받아,
 ### 2.1.1 맥락 입력 소비 규칙 (용어 통일)
 
 - 인지팀은 inattentive 판단 시 노트북에서 VLM을 직접 호출하고 맥락(`reason`)을 전달한다.
-- Step C는 `reason`을 직접 소비하며, 별도 VLM 호출 요청 신호는 사용하지 않는다.
-- 정책 결정 우선순위는 항상 `driver_state`가 최상위이고, `reason`은 overlay/HMI 보강 신호다.
+- Step C는 `active_reason_set`이 있으면 이를 우선 소비하고, 없으면 `representative_reason` 또는 `reason`을 사용한다.
+- 정책 결정 우선순위는 항상 `driver_state`가 최상위이고, 맥락은 overlay/HMI 보강 신호다.
+
+### 2.1.2 다중 맥락 동시 대응 규칙
+
+- 다중 맥락 대응은 `Method B (worst-only)`만 사용한다.
+- `active_reason_set`이 들어오면 Step B 우선순위 규칙으로 `representative_reason` 1개를 선택해 반영한다.
+- 종방향 제어(`throttle_limit`)는 `representative_reason` 1개 기준 overlay를 적용한다.
+- HMI 문구는 대표 맥락 1개를 헤드라인으로 쓰고, 나머지는 suffix로 병기할 수 있다.
+- 대표 맥락 우선순위: `unresponsive > intoxicated > drowsy > phone > unknown > none`
+- `recover_elapsed`는 Step C HMI 모듈 내부 타이머 파라미터이며, 외부 인터페이스 입력 필드는 아니다.
 
 설계 원칙:
 
@@ -203,7 +214,7 @@ Overlay 불변식:
 |---|---|---|---|---|
 | `INFO` | `driver_state=OK` 일반 주행 | "시스템 정상 대기/주행" | 정보성 시각 표시만 | 상태 악화 시 상위 레벨로 즉시 승격 |
 | `INFO` | `driver_override=true` 이후 재개 대기 | **"자동 재개 없음, 운전자 의도 조작 필요"** | 정보성 시각 표시 + 고정 배너 권장 | 운전자 명시 조작으로 재활성화 완료 시 |
-| `EOR` | `driver_state=WARNING` (초기/지속) | "전방 주시 필요" / "핸들을 잡아주세요" | 연속 시각 + 음향/햅틱(최소 1개), 지속 시 반복/증폭 | `recover_elapsed>=200ms` 시 경고 채널 완화 가능(상태 유지), Step B 복귀(`OK`) 시 완전 해제 |
+| `EOR` | `driver_state=WARNING` (초기/지속) | "전방 주시 필요" / "핸들을 잡아주세요" | 연속 시각 + 음향/햅틱(최소 1개), 지속 시 반복/증폭 | Step C 내부 타이머 `recover_elapsed>=200ms` 시 경고 채널 완화 가능(상태 유지), Step B 복귀(`OK`) 시 완전 해제 |
 | `DCA` | `driver_state=UNRESPONSIVE` | **"즉시 수동 인수"** | 명령형 최대 가시성 + 강한 반복 음향/햅틱 | 운전자 인수 확인(`driver_override=true`) 또는 `MRM` 승격 |
 | `MRM` | `driver_state=ABSENT` 또는 `mrm_active=true` | **"운전자 부재 - 안전 정지 중"** | 최대 경고(시각/음향/햅틱) + 진행 상태 고정 표시 | run cycle 정책상 자동 해제 금지(수동/재시동 정책 따름) |
 
@@ -308,19 +319,21 @@ def evaluate_policy(
     driver_state: DriverState,
     reason: Reason,
     lkas_throttle: float,
+    active_reason_set: set[Reason] | None = None,
+    representative_reason: Reason | None = None,
     lkas_mode: str = "OFF",
     current_manoeuvre_type: str = "NONE",
     next_manoeuvre_type: str = "NONE",
     next_manoeuvre_eta_s: float | None = None,
-  reason_context_source: str = "step_b_bridge"
+    reason_context_source: str = "step_b_bridge"
 ) -> PolicyOutput:
     """
     상태에 따라 제어값, HMI, MRM 활성 여부 결정
     """
     # 상태별 기본값
     policy_map = {
-      DriverState.OK: (1.00, "INFO", False),
-      DriverState.WARNING: (0.60, "EOR", False),
+        DriverState.OK: (1.00, "INFO", False),
+        DriverState.WARNING: (0.60, "EOR", False),
         DriverState.UNRESPONSIVE: (0.20, "DCA", False),
         DriverState.ABSENT: (0.0, "MRM", True),
     }
@@ -336,7 +349,19 @@ def evaluate_policy(
         "unknown": 1.00,
         "none": 1.00,
     }
-    overlay_gain = reason_overlay.get(reason, 1.00)
+
+    # multi-context resolution
+    reasons = set(active_reason_set or [])
+    if not reasons:
+        reasons.add(representative_reason or reason)
+
+    priority = ["unresponsive", "intoxicated", "drowsy", "phone", "unknown", "none"]
+    resolved_representative_reason = next(
+        (reason_item for reason_item in priority if reason_item in reasons),
+        "none",
+    )
+
+    overlay_gain = reason_overlay.get(resolved_representative_reason, 1.00)
 
     throttle_limit = ratio * overlay_gain * lkas_throttle
 
@@ -346,7 +371,9 @@ def evaluate_policy(
         "next_manoeuvre_type": next_manoeuvre_type,
         "next_manoeuvre_eta_s": next_manoeuvre_eta_s,
         "hmi_action": hmi,
-      "reason_context_source": reason_context_source,
+        "reason_context_source": reason_context_source,
+        "active_reason_set": sorted(reasons),
+        "representative_reason": resolved_representative_reason,
     }
     
     return PolicyOutput(
@@ -362,6 +389,7 @@ def evaluate_policy(
 - **상태 단조성**: 상위 상태(`ABSENT`)에서 `throttle_limit`이 하위 상태보다 작거나 같음
 - **MRM 활성**: `driver_state=ABSENT`일 때만 `mrm_active=true`
 - **reason 처리**: `reason=intoxicated`에서 Overlay 보수화 규칙이 적용되는지 확인
+- **다중 맥락 처리**: `active_reason_set={drowsy,intoxicated}`일 때 `representative_reason=intoxicated`로 선택되고 해당 gain이 적용되는지 확인
 - **비율 적용**: 각 상태별 비율값이 정확히 적용되는지 확인
 
 ---

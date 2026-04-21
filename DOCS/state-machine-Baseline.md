@@ -31,15 +31,17 @@
   - `jetracer_input_0_4`
     - JetRacer 런타임 입력값(범위 `0.0 ~ 0.4`)
     - 물리적 `km/h`가 아니라 주행 맥락용 정규화 입력이다
-  - `lkas_steer_abs` (`|steering|`, 범위 `0.0 ~ 0.65`)
   - `current_state` (현재 운전자 상태)
 - 선택 입력
   - `inattentive_elapsed`  
     - 외부에서 주는 값이 아니라 Step B 내부 누적 타이머(기본)
   - `warning_elapsed` (WARNING 상태 체류시간)
   - `input_stale` (센서 stale/파싱 실패 플래그)
+    - 프로토타입 v0에서는 사용하지 않으며, 런타임에서 항상 `false`로 취급
+  - `lkas_steer_abs` (`|steering|`, 범위 `0.0 ~ 0.65`)
+    - 정책 전이 계산에는 사용하지 않고, 시스템 기동/상태 표시 및 로그 용도로만 사용
   - `road_curvature`
-    - LKAS가 제공하는 현재 주행 커브 맥락(있으면 사용, 없으면 `lkas_steer_abs`로 대체)
+    - LKAS가 제공하는 현재 주행 커브 맥락(정책 전이 미사용, 상태 표시/로그 용도)
   - `recovery_eligibility` (**[신규]**, optional)
     - 맥락별 회복 가능성 (e.g., drowsy는 깨어남 신호, unresponsive는 불가능)
 
@@ -86,7 +88,7 @@
   - 실제 판단의 주축은 여전히 `is_attentive`와 그 지속시간(`inattentive_elapsed` / `recover_elapsed`)이다.
   - 커브 구간 추가 보정계수를 두지 않는 이유: LKAS가 커브에서 이미 속도를 낮추므로 위험도는 `speed_band`에 간접 반영된다.
 
-- `steer_band`는 정규화 조향으로 정의
+- `steer_band`는 상태표시/로그 참고용으로만 정의
   - `rho_s = lkas_steer_abs / 0.65`
   - `LOW`: `rho_s < 0.30`
   - `MID`: `0.30 <= rho_s < 0.65`
@@ -99,14 +101,15 @@
 
 주의:
 
-- speed/steer 경계값(`0.30`, `0.65`)은 캘리브레이션 항목이며, 변경 시 로그 근거를 함께 남긴다.
+- speed band 경계값(`0.30`, `0.65`)은 캘리브레이션 항목이며, 변경 시 로그 근거를 함께 남긴다.
+- `steer_band` 경계는 정책 전이에 영향을 주지 않는 표시용 기준값이다.
 
 ---
 
 ## 2.4 운전자 맥락 (Reason) 분류
 
 **[신규 요구사항]** 인지팀이 제공하는 `reason` 필드를 Step B에 통합.
-이는 **집중 안 한 원인**을 분류하여 상태 전이 타이밍을 상향 조정(보수화)할 근거 제공.
+이는 **집중 안 한 원인**을 분류하여 즉시 상향 전이/Step C 대응 강도 결정을 위한 의미 신호를 제공한다.
 
 | Reason | 의미 | 특성 | 위험도(상대) | 회복 가능성 |
 |---|---|---|---|---|
@@ -168,7 +171,11 @@
 
 - 상태 전이 판정은 `is_attentive/inattentive_elapsed`가 주축이다.
 - 단, `critical reason` active 시 즉시 상향 규칙이 타이머 규칙보다 우선한다.
-- Step C로 내려보내는 `reason`은 대표 reason 1개와 원본 `active_reason_set`을 함께 전달하는 것을 권장한다.
+- Step C로 내려보내는 맥락은 아래 2가지 전략을 모두 지원한다.
+
+다중 맥락 처리 전략:
+
+- `Method B (worst-only)`: Step B가 `representative_reason` 1개만 선택해 Step C가 소비
 
 ---
 
@@ -184,9 +191,8 @@
 
 ### 3.2 복귀 규칙 가드 (핵심)
 
-- 기본 복귀: `is_attentive=yes` 연속 유지 `>= T_recover_base`이면 `next_state=OK`
-- 예외 가드: `representative_reason=unresponsive`이면 복귀 규칙을 무시하고 상태 하향을 금지
-- 즉, `unresponsive` 판정이 active인 동안은 `UNRESPONSIVE/ABSENT -> OK` 전이를 허용하지 않는다.
+- 기본 복귀: `is_attentive=yes` 연속 유지 `>= T_recover_hold`이면 `next_state=OK`
+- `unresponsive` 맥락이라도 위 조건을 만족하면 복귀를 허용한다.
 
 ---
 
@@ -195,7 +201,7 @@
 > 아래 값은 자연주의 연구 경향 + 규정 시한 구조를 반영한 기준선이며,
 > 실제 배포값은 플랫폼별 캘리브레이션으로 확정한다.
 
-| speed band | base `T_warn` | base `T_unresponsive` | base `T_absent` | `T_recover` |
+| speed band | base `T_warn` | base `T_unresponsive` | base `T_absent` | `T_recover_hold` |
 |---|---:|---:|---:|---:|
 | LOW | 3.0s | 6.0s | 10.0s | 1.0s |
 | MID | 2.0s | 4.0s | 8.0s | 1.2s |
@@ -212,7 +218,7 @@
 - `T_warn_eff = T_warn_base(speed_band)`
 - `T_unresp_eff = T_unresp_base(speed_band)`
 - `T_absent_eff = T_absent_base(speed_band)`
-- `T_recover_eff = T_recover_base` (기본 복귀 시간)
+- `T_recover_hold = T_recover_hold_base(speed_band)` (기본 복귀 유지시간)
 
 해석:
 
@@ -237,22 +243,28 @@
 
 전이 우선순위는 상향(악화) 우선이며, 상태 우선순위는 `ABSENT > UNRESPONSIVE > WARNING > OK`이다.
 
+구현 순서(고정, if-else 체인 권장):
+
+1. `active_reason_set`에 critical reason이 있으면 즉시 `>= UNRESPONSIVE`로 상향
+2. `inattentive_elapsed` 기반 상향 전이(`OK->WARNING->UNRESPONSIVE->ABSENT`)
+3. `200ms <= recover_elapsed < T_recover_hold`이면 경고 해제만 허용하고 상태 유지
+4. `recover_elapsed >= T_recover_hold`이면 `OK` 복귀
+5. (`v1`에서만) stale fail-safe 적용
+
 | 현재 상태 | 조건 | 다음 상태 | 맥락별 보정 |
 |---|---|---|---|
 | ANY | `active_reason_set`에 critical reason 포함 | 즉시 `max(current_state, UNRESPONSIVE)` | 타이머 무관 즉시 상향 |
 | OK | `inattentive_elapsed >= T_warn_eff` | WARNING | reason 타이머 보정 없음 |
 | WARNING | `inattentive_elapsed >= T_unresp_eff` | UNRESPONSIVE | reason 타이머 보정 없음 |
 | UNRESPONSIVE | `inattentive_elapsed >= T_absent_eff` | ABSENT | reason 타이머 보정 없음 |
-| WARNING/UNRESPONSIVE/ABSENT | `200ms <= recover_elapsed < T_recover_eff` | 현재 상태 유지 | 재참여 확인(경고 해제 가능), 상태 하향 금지 |
-| WARNING/UNRESPONSIVE/ABSENT | `is_attentive=yes` 연속 유지 `>= T_recover_eff` | OK | 단, 아래 `unresponsive` 복귀 가드 우선 |
-| UNRESPONSIVE/ABSENT | `representative_reason == unresponsive` | 상태 유지(하향 금지) | **강제 가드: 복귀 불가** |
+| WARNING/UNRESPONSIVE/ABSENT | `200ms <= recover_elapsed < T_recover_hold` | 현재 상태 유지 | 재참여 확인(경고 해제 가능), 상태 하향 금지 |
+| WARNING/UNRESPONSIVE/ABSENT | `is_attentive=yes` 연속 유지 `>= T_recover_hold` | OK | 맥락 종류와 무관하게 복귀 허용 |
 | ANY | `input_stale=true` 또는 입력 누락 | stale fail-safe | 맥락 상관없이 최상 유지 |
 
 **복귀 규칙 상세:**
 
-- 기본 복귀: `is_attentive=yes` 연속 유지 `>= T_recover_base`이면 `next_state=OK`
-- 예외 가드: `representative_reason=unresponsive`이면 복귀 규칙을 무시하고 상태 하향을 금지
-- 즉, `unresponsive` 판정이 active인 동안은 `UNRESPONSIVE/ABSENT -> OK` 전이를 허용하지 않는다.
+- 기본 복귀: `is_attentive=yes` 연속 유지 `>= T_recover_hold`이면 `next_state=OK`
+- `unresponsive` 맥락에서도 위 조건을 만족하면 복귀를 허용한다.
 
 ### 6.1 맥락 수신 흐름 (인지팀 주도 VLM)
 
@@ -269,7 +281,7 @@
 - `recover_elapsed`가 200ms에 도달하기 전에 다시 시선/머리 자세가 이탈하면,
   누적은 끊기고 EOR는 유지된다.
 - 짧은 이탈이 여러 번 반복되면, 제조업체 전략에 따라 다음 중 하나를 적용한다.
-  - `T_recover`를 일시적으로 증가시켜 더 긴 안정 구간을 요구한다.
+  - `T_recover_hold`를 일시적으로 증가시켜 더 긴 안정 구간을 요구한다.
   - 또는 즉시/조기 EOR를 다시 발령하여 반복적인 짧은 복귀를 억제한다.
 
 해석:
@@ -279,7 +291,7 @@
 - 따라서 이 프로젝트에서는 `recover_elapsed`를 EOR 해제와 상태 복귀의 공통 검증 변수로 사용하되,
   경고 해제와 상태 전이는 분리해서 관리한다.
 - 구체적으로 `recover_elapsed >= 200ms`에서 경고 해제(재참여 confirmed)는 가능하지만,
-  `recover_elapsed < T_recover_eff`인 동안 상태는 하향하지 않는다.
+  `recover_elapsed < T_recover_hold`인 동안 상태는 하향하지 않는다.
 
 ### 6.2 복귀 시 타이머 처리(명시)
 
@@ -294,8 +306,8 @@
 
 - `is_attentive=no`가 들어오면 `recover_elapsed = 0`
 - `is_attentive=yes`가 들어오면 `recover_elapsed`를 누적하고 `inattentive_elapsed`는 유지
-- `200ms <= recover_elapsed < T_recover_eff`이면 경고 해제만 허용하고 `next_state = current_state`를 유지
-- `recover_elapsed >= T_recover_eff`가 되면 `next_state = OK`로 복귀하고 `inattentive_elapsed = 0`, `recover_elapsed = 0`
+- `200ms <= recover_elapsed < T_recover_hold`이면 경고 해제만 허용하고 `next_state = current_state`를 유지
+- `recover_elapsed >= T_recover_hold`가 되면 `next_state = OK`로 복귀하고 `inattentive_elapsed = 0`, `recover_elapsed = 0`
 
 주의:
 
@@ -306,7 +318,9 @@
 
 - 짧은 eyes-on 반복으로 타이머를 악용해 경고를 우회하는 패턴(system abuse)을 방지
 
-### 6.3 stale fail-safe 규칙(충돌 방지)
+### 6.3 stale fail-safe 규칙(충돌 방지, v1 안전강화)
+
+프로토타입 v0에서는 `input_stale`를 사용하지 않으며, 아래 규칙은 v1부터 활성화한다.
 
 `input_stale=true` 또는 필수 입력 누락 시 다음 규칙을 적용한다.
 
@@ -352,7 +366,7 @@
 
 - `Late Warning Rate` 높음 -> 해당 band `T_warn_base` 10% 감소
 - `Early Warning Rate` 높음 -> 해당 band `T_warn_base` 10% 증가
-- 복귀 흔들림 높음 -> `T_recover` 0.2s 증가
+- 복귀 흔들림 높음 -> `T_recover_hold` 0.2s 증가
 
 중요:
 
@@ -404,8 +418,8 @@
 | speed band별 단축 | LOW > MID > HIGH | 맥락/시나리오/속도에 따라 주의여유 변화[^s5][^s6] | 맥락 의존 정책화 |
 | `T_unresponsive`, `T_absent` 단계 | 단계형 상승 | eyes-off와 lane-keeping 저하 연계[^s7], 경고 단계 시험체계[^s8][^s9][^s12] | 성능 저하 + 시험 구조 |
 | critical reason 즉시 상향 | `unresponsive/intoxicated` 시 즉시 `>=UNRESPONSIVE` | 응급/고위험 맥락 보수 운용 원칙 | 안전 우선 |
-| `T_recover` | OK 직접 복귀 | 최소 재참여 시간 요구(200ms)[^s10] | 재참여 안정화 |
-| speed/steer 경계값 | `rho_v`, `rho_s` band 경계 | 맥락 의존 연구 + 스케일카 정규화 전략[^s5][^s6] | 기준선 경계(B/C) |
+| `T_recover_hold` | OK 직접 복귀 | 최소 재참여 시간 요구(200ms)[^s10] | 재참여 안정화 |
+| speed band 경계값 | `rho_v` band 경계 | 맥락 의존 연구 + 스케일카 정규화 전략[^s5][^s6] | 기준선 경계(B/C) |
 | `T_warn_eff` 상한 | `<=5.0s` clamp | UNECE EOR 5s 앵커 보호[^s10] | 규정 방어 로직 |
 | stale fail-safe | `OK->WARNING`, `WARNING+`는 freeze | 규정 경고전략 + 안전 우선[^s8][^s10] | 안전 원칙 |
 
@@ -426,11 +440,11 @@
 | EOR 5s / escalation +3s / DCA +5s / unavailability +10s / re-engagement 200ms | 확정값(규정앵커) | A | UNECE R171 조항[^s10] |
 | `T_warn` MID=2.0s | 가정값(캘리브레이션) | B | 2s 위험 경계 신호 정합[^s1][^s2][^s3][^s11] |
 | speed band 테이블 | 가정값(캘리브레이션) | B | 맥락 의존 연구 기반[^s5][^s6] |
-| speed/steer 경계값(`rho_v`, `rho_s`) | 가정값(캘리브레이션) | B | 스케일카 정규화 경계(변경 시 버전관리) |
+| speed band 경계값(`rho_v`) | 가정값(캘리브레이션) | B | 스케일카 정규화 경계(변경 시 버전관리) |
 | `T_unresponsive`, `T_absent` | 가정값(캘리브레이션) | B | 단계형 경고 설계 + 시험체계 정합[^s7][^s12] |
 | reason 기반 타이머 보정 | **미사용(v0 고정)** | C | 맥락은 즉시 상향/의미 신호로만 사용 |
 | `T_warn_eff` 하한 | 가정값(캘리브레이션) | C | 운영 안정성 가정 |
-| stale 시 `OK->WARNING`, `WARNING+` freeze | 확정규칙(안전원칙) | B | 안전 우선 |
+| stale 시 `OK->WARNING`, `WARNING+` freeze | v1 규칙(프로토타입 v0 비활성) | B | 안전 우선 |
 
 ---
 
@@ -455,7 +469,7 @@
 
 - `A` 등급 항목(규정 앵커)은 문서/코드/테스트에서 고정 관리
 - `B/C` 항목은 플랫폼별 데이터로 재추정하고 버전 태깅
-- 문서/코드 동일 파라미터 키(`T_warn_base`, `T_unresp_base`, `T_absent_base`, `T_recover_base`) 유지
+- 문서/코드 동일 파라미터 키(`T_warn_base`, `T_unresp_base`, `T_absent_base`, `T_recover_hold`) 유지
 
 ---
 
