@@ -1,12 +1,12 @@
 # Control Policy Baseline (Step C)
 
 본 문서는 `DCAS-PolicyEngine`의 Step C(정책 결정/제어 제한) **기준선(Baseline)** 명세다.
-Step B 상태(`OK -> WARNING -> UNRESPONSIVE -> ABSENT`)를 입력받아,
+Step B 상태(`OK -> WARNING -> ESCALATION -> ABSENT`)를 입력받아,
 제어 제한·HMI·MRM 활성 여부를 일관되게 산출한다.
 
 핵심 목표:
 
-1. 규정 앵커(UNECE/Euro NCAP)와 충돌하지 않는 대응 정책 고정
+1. 규정 앵커(UNECE/Euro NCAP)를 참고하되, 프로젝트 기준선 정책을 일관되게 고정
 2. 규정 고정값(A)과 캘리브레이션 항목(B/C) 분리
 
 ---
@@ -21,6 +21,7 @@ Step B 상태(`OK -> WARNING -> UNRESPONSIVE -> ABSENT`)를 입력받아,
   - `throttle_limit`: 상태별 제어값
   - `hmi_action`: 경고/안내 메시지 (INFO/EOR/DCA/MRM)
   - `mrm_active`: ABSENT 진입 시 MRM 감속 모드 활성 여부
+  - `driver_override_lock`: MRM 상태에서 운전자 오버라이드 잠금 여부(`intoxicated`만 `true`)
 - 비범위:
   - 상태 전이 타이밍 계산(= Step B)
   - 저수준 제어기(PID/MPC) 내부 파라미터 튜닝
@@ -31,36 +32,35 @@ Step B 상태(`OK -> WARNING -> UNRESPONSIVE -> ABSENT`)를 입력받아,
 
 ### 2.1 입력
 
-- `driver_state`: `OK | WARNING | UNRESPONSIVE | ABSENT`
-- `reason`: `phone | drowsy | unresponsive | intoxicated | none | unknown` (대표 맥락, fallback)
-- `active_reason_set` (optional): 동시 다중 맥락 원본 집합
-- `representative_reason` (optional): Step B가 계산한 대표 맥락
+- `driver_state`: `OK | WARNING | ESCALATION | ABSENT`
+- `reason`: `phone | drowsy | unresponsive | intoxicated | none | unknown`
 - `lkas_throttle`: LKAS가 요청한 원시 종방향 제어값
 - `input_stale`: 센서/파싱 stale (**프로토타입 v0에서는 미사용, 예약 필드**)
-- `aeb_active` (optional): 긴급 제동/충돌회피 시스템 활성 상태
 - `driver_override` (optional): 운전자가 비지원 제어(조향/제동/가속)로 직접 인수했는지 여부
-- `lkas_mode` (optional): `OFF | ON_INACTIVE | ON_PASSIVE | ON_ACTIVE`
+- `lkas_switch_event` (optional): `NONE | ON | OFF`
+- `lkas_mode` (optional): `OFF | ON_INACTIVE | ON_ACTIVE`
 - `notebook_input_alive` (optional): 노트북(인지 입력) 수신 유효 여부
-- `manoeuvre_state` (optional): `NONE | PRE_ANNOUNCED | IN_PROGRESS`
 - `manoeuvre_type` (optional): `NONE | CURVE_FOLLOW | LANE_CHANGE | TURN | MRM`
-- `next_manoeuvre_type` (optional): `NONE | CURVE_FOLLOW | LANE_CHANGE | TURN | MRM`
-- `next_manoeuvre_eta_s` (optional): 다음 기동 시작까지 남은 시간(초)
-- `manoeuvre_notice_lead_s` (optional): 시스템 주도 기동 사전 통지 리드타임(초)
 - `reason_context_source` (optional): `perception_notebook | step_b_bridge` (맥락 입력 출처 추적용)
 
 ### 2.1.1 맥락 입력 소비 규칙 (용어 통일)
 
 - 인지팀은 inattentive 판단 시 노트북에서 VLM을 직접 호출하고 맥락(`reason`)을 전달한다.
-- Step C는 `active_reason_set`이 있으면 이를 우선 소비하고, 없으면 `representative_reason` 또는 `reason`을 사용한다.
+- 인지 흐름상 `is_attentive` 판단이 항상 기준 신호이며, Step B는 이를 authoritative input으로 사용한다.
+- `reason`은 `is_attentive=no`일 때 그 시점의 맥락 설명값으로만 사용한다.
+- 따라서 `is_attentive=yes`로 Step B가 정규화한 주기에서는, `reason`이 critical이어도 Step C는 이를 `none`으로 간주한 결과만 받는다.
+- `is_attentive_ts_ms`, `reason_ts_ms`는 Step C 판단용 입력이 아니라, perception 입력 정합성 확인/로그용 메타데이터다.
+- Step C는 Step B가 실제 계산에 사용한 최종 `driver_state`와 `reason`만 소비한다.
+- Step C는 매 주기 입력된 `reason` 1개만 소비한다.
+- `reason`은 항상 Step B가 현재 계산 주기에 사용한 값만 유효하며, 이전 주기의 reason은 유지하지 않는다.
 - 정책 결정 우선순위는 항상 `driver_state`가 최상위이고, 맥락은 overlay/HMI 보강 신호다.
 
-### 2.1.2 다중 맥락 동시 대응 규칙
+### 2.1.2 단일 맥락 입력 규칙
 
-- 다중 맥락 대응은 `Method B (worst-only)`만 사용한다.
-- `active_reason_set`이 들어오면 Step B 우선순위 규칙으로 `representative_reason` 1개를 선택해 반영한다.
-- 종방향 제어(`throttle_limit`)는 `representative_reason` 1개 기준 overlay를 적용한다.
-- HMI 문구는 대표 맥락 1개를 헤드라인으로 쓰고, 나머지는 suffix로 병기할 수 있다.
-- 대표 맥락 우선순위: `unresponsive > intoxicated > drowsy > phone > unknown > none`
+- 인지팀은 매 주기 `reason` 1개만 전달한다.
+- `is_attentive=yes`로 정규화된 주기에서는 `reason=none`으로 함께 정규화한다.
+- Step C는 Step B가 정규화한 `reason` 1개를 그대로 overlay/HMI 판단에 사용한다.
+- 이전 주기의 reason은 누적하지 않으며, 현재 계산 주기의 reason만 유효하다.
 - `recover_elapsed`는 Step C HMI 모듈 내부 타이머 파라미터이며, 외부 인터페이스 입력 필드는 아니다.
 
 설계 원칙:
@@ -74,53 +74,65 @@ Step B 상태(`OK -> WARNING -> UNRESPONSIVE -> ABSENT`)를 입력받아,
 - `throttle_limit`: 상태별 제어값 제한
 - `hmi_action`: 경고/지시 메시지 (상태에 따라 결정)
 - `mrm_active`: `true | false` (ABSENT 진입 시 `true`)
+- `driver_override_lock`: `true | false` (`driver_state=ABSENT and reason=intoxicated`일 때 `true`)
+  - `driver_override_lock=true`가 되면 프로그램(run cycle) 종료 전까지 해제하지 않는다.
+- `policy_latched_state` (internal/state-store 권장):
+  - `driver_override_lock_latched`
+  - `mrm_activation_count_run_cycle`
+  - `run_cycle_id`
 - `dashboard_state` (권장):
-  - `lkas_mode`: `OFF | ON_INACTIVE | ON_PASSIVE | ON_ACTIVE`
+  - `lkas_mode`: `OFF | ON_INACTIVE | ON_ACTIVE`
   - `current_manoeuvre_type`: `NONE | CURVE_FOLLOW | LANE_CHANGE | TURN | MRM`
-  - `next_manoeuvre_type`: `NONE | CURVE_FOLLOW | LANE_CHANGE | TURN | MRM`
-  - `next_manoeuvre_eta_s`: 다음 기동 시작 예정까지 남은 시간(초)
   - `hmi_action`: INFO/EOR/DCA/MRM 경고/지시 메시지
   - `reason_context_source`: 맥락 입력 출처 추적 정보(옵션)
 
+래치 상태 소유 원칙:
+
+- run cycle 지속 상태(`driver_override_lock_latched`, `mrm_activation_count_run_cycle`, lockout)는 **Step C 내부 계산값**이지만,
+  저장 주체는 상위 `DCAS-PolicyEngine runtime/state-store`로 둔다.
+- 이유:
+  - Step B와 Step C가 동일 run cycle 경계를 공유해야 함
+  - 프로세스/함수 재호출 간에도 래치를 안정적으로 유지해야 함
+  - 순수 함수형 정책 평가와 persistent state 관리를 분리할 수 있음
+- 따라서 Step C는 래치 갱신 규칙의 owner이고, runtime/state-store는 그 값을 저장/복원하는 owner다.
+
 추가 해석(R171규정 정합):
 
+- `lkas_mode`는 Step C가 authoritative owner로 관리한다.
 - `lkas_mode`는 아래 순서로 진행한다.
   - `OFF`: 사용자가 ON 요구를 하지 않은 상태
   - `ON_INACTIVE`: 사용자가 ON을 눌렀지만 LKAS 시작 조건이 아직 충족되지 않은 상태
-  - `ON_PASSIVE`: ON은 눌렸고, LKAS 시작 조건이 충족되어 대기 중인 상태
   - `ON_ACTIVE`: LKAS가 실제로 제어를 수행하는 상태
 
-LKAS 시작 조건(Stand-by/Inactive -> Stand-by/Passive 진입 조건):
+LKAS 시작 조건(`OFF/ON_INACTIVE -> ON_ACTIVE` 진입 조건):
 
 - `driver_state == OK`
 - `notebook_input_alive == true` (노트북 입력 수신 가능)
 
-운전자 최종 승인에 의한 활성화(Stand-by/Passive -> Active):
+사용자 조작 규칙:
 
-- 운전자가 `SET` 버튼/속도 세팅 등 최종 승인 조작을 수행하면 `ON_ACTIVE`로 **즉시 전이**한다.
-- 이 전이는 3초 대기 없이 즉시 제어 개입을 시작한다.
-
-시스템 주도 기동 리드타임(활성화와 분리):
-
-- 최소 3초 사전 통지(`manoeuvre_notice_lead_s >= 3.0s`) 규칙은 **시스템 주도 기동**에만 적용한다.
-- 즉, "운전자가 시스템을 활성화하는 행위"와 "시스템이 주도적으로 방향을 크게 바꾸는 기동"은 분리해서 다룬다.
+- 사용자 조작은 `ON`, `OFF` 두 가지만 사용한다.
+- Step C는 매 주기 `lkas_switch_event`를 소비해 `lkas_mode`를 갱신한다.
+- `lkas_switch_event=ON`이고 시작 조건이 충족되면 `ON_ACTIVE`로 **즉시 전이**한다.
+- `lkas_switch_event=ON`이고 시작 조건이 미충족이면 `ON_INACTIVE`에 머문다.
+- `lkas_switch_event=OFF`이면 현재 상태와 무관하게 `OFF`로 전이한다.
+- `lkas_switch_event=NONE`이면 기존 `lkas_mode`를 유지한다.
+- 이 활성화 전이는 3초 대기 없이 즉시 제어 개입을 시작한다.
+- 같은 주기에 `lkas_switch_event`와 `driver_override`가 동시에 들어오면, **`lkas_switch_event`를 우선 적용**한다.
 
 전이 규칙(모드 계층):
 
-- `OFF -> ON_INACTIVE`: 사용자가 ON 버튼/조작을 수행했으나 시작 조건이 아직 미충족
-- `ON_INACTIVE -> ON_PASSIVE`: 시작 조건 충족 시 대기 상태로 진입
-- `ON_PASSIVE -> ON_ACTIVE`: 운전자 최종 승인(`SET`/속도 세팅) 직후 즉시 제어 개입 시작
-- `ON_ACTIVE -> ON_PASSIVE`: 제어 조건 상실/일시 중단 시
-- `ON_PASSIVE -> ON_INACTIVE`: ON은 유지되나 시작 조건을 다시 잃은 경우
-- `ON_INACTIVE/ON_PASSIVE/ON_ACTIVE -> OFF`: 사용자가 OFF를 누르거나 시스템이 종료될 때
+- `OFF -> ON_INACTIVE`: `lkas_switch_event=ON`이고 시작 조건이 아직 미충족
+- `OFF -> ON_ACTIVE`: `lkas_switch_event=ON`이고 시작 조건도 충족된 경우
+- `ON_INACTIVE -> ON_ACTIVE`: ON 유지 중 시작 조건 충족 시 즉시 제어 개입 시작
+- `ON_ACTIVE -> ON_INACTIVE`: ON은 유지되나 시작 조건을 다시 잃은 경우
+- `ON_INACTIVE/ON_ACTIVE -> OFF`: `lkas_switch_event=OFF` 또는 시스템 종료 시
+- `ON_ACTIVE -> OFF`: `driver_override=true`가 유효하고 `driver_override_lock=false`이면 즉시 제어 권한 종료
 
 대시보드 의미 규칙:
 
-- `manoeuvre_state=PRE_ANNOUNCED`는 "곧 수행할 기동" 예고 상태다.
-- `manoeuvre_state=IN_PROGRESS`는 "현재 수행 중인 기동" 상태다.
-- 현재 기동의 종류(커브 추종/MRM 등)는 `current_manoeuvre_type`으로 표시한다.
-- 다음 예정 기동은 `next_manoeuvre_type`과 `next_manoeuvre_eta_s`로 함께 표시한다.
-- `manoeuvre_state=NONE`이면 `next_manoeuvre_type=NONE`, `next_manoeuvre_eta_s=null`을 권장한다.
+- 현재 수행 중인 기동의 종류(커브 추종/MRM 등)는 `current_manoeuvre_type`으로 표시한다.
+- 다음 예정 기동 정보는 Step C 입력 범위에 포함하지 않는다.
 - 운전자 개입 요구(EOR/DCA/Unavailability)는 별도 enum이 아니라 `hmi_action`으로 전달한다.
 - `lkas_mode`는 “전원 상태”가 아니라 “사용자 요청/시작 조건/제어 개입 수준”을 함께 표현하는 상태다.
 
@@ -131,14 +143,16 @@ LKAS 시작 조건(Stand-by/Inactive -> Stand-by/Passive 진입 조건):
 | 앵커 | Step C에 필요한 해석 | 출처 |
 |---|---|---|
 | 시스템 제어는 충돌 위험을 줄이되 운전자 개입 가능해야 함 | 급격/과도한 제어를 피하고, 항상 운전자 개입 가능 상태 유지 | UNECE R171 5.3.4, 5.3.6.1[^c1] |
-| 경계/종료 시 보조 기능은 controllable way로 종료 | `UNRESPONSIVE/ABSENT`에서도 종료·감속 전략은 조향 안정성 유지 | UNECE R171 5.3.5.2.1[^c1] |
-| EOR는 시각 + 타 모달리티, DCA는 즉시 수동 인수 명령 | WARNING/UNRESPONSIVE의 HMI는 다중모달 구조로 고정 | UNECE R171 5.5.4.2.3.2~3[^c1] |
-| 경고 에스컬레이션 시 emergency 시스템 경고 우선 고려 | AEBS 등과 동시 활성 시 HMI arbitration 필요 | UNECE R171 5.5.4.2.2.2[^c1] |
-| 운전자가 모드/기동 상황을 오인하지 않도록 명확한 HMI 필요 | 현재 수행 기동 + 다음 예정 기동을 구분 표기하여 모드 혼동 최소화 | UNECE R171 5.5.1, 5.5.2, 5.5.4.1[^c1] |
+| 경계/종료 시 보조 기능은 controllable way로 종료 | `ESCALATION/ABSENT`에서도 종료·감속 전략은 조향 안정성 유지 | UNECE R171 5.3.5.2.1[^c1] |
+| EOR는 시각 + 타 모달리티, DCA는 즉시 수동 인수 명령 | `WARNING`은 EOR만 수행하고, `ESCALATION`은 DCA + 강도 증가를 수행한다(단, Step B가 `unresponsive/intoxicated`를 ABSENT로 전달하면 Step C는 즉시 MRM 수행) | UNECE R171 5.5.4.2.3.2~3[^c1] |
+| 경고/상태 변화 시 운전자가 혼동하지 않도록 일관된 표시 필요 | Step C는 단일 HMI 채널에서 상태 우선순위에 따라 일관된 표시를 유지 | UNECE R171 5.5.4 계열 해석[^c1] |
+| 운전자가 모드/기동 상황을 오인하지 않도록 명확한 HMI 필요 | 현재 수행 중인 기동과 시스템 상태를 명확히 표기하여 모드 혼동 최소화 | UNECE R171 5.5.1, 5.5.2, 5.5.4.1[^c1] |
 
 해석 원칙:
 
 - 규정은 "정확한 throttle/steer 비율"을 직접 강제하지 않는다.
+- 본 문서의 규정 앵커는 설계 참고용이며, 기준선 시간/비율값은 프로젝트 정책 테이블을 우선한다.
+- 단, `T_warn_eff`의 최대 허용값 `5.0s`는 규정 상한으로 유지한다.
 - 따라서 비율값은 캘리브레이션 대상(B/C)이지만,
   - 에스컬레이션 구조,
   - 다중모달 경고,
@@ -156,18 +170,27 @@ LKAS 시작 조건(Stand-by/Inactive -> Stand-by/Passive 진입 조건):
 |---|---:|---|---|
 | OK | `1.00 * lkas_throttle` | 정보성 표시만 | false |
 | WARNING | `<= 0.60 * lkas_throttle` | EOR (반복 음향/햅틱) | false |
-| UNRESPONSIVE | `<= 0.20 * lkas_throttle` | DCA (즉시 수동 인수) | false |
+| ESCALATION | `<= 0.20 * lkas_throttle` | DCA (즉시 수동 인수, 기본) | false |
 | ABSENT | `0.0` | MRM + 최대 경고 | **true** |
 
 실행 규칙:
 
-- 상위 상태 완화 금지: `ABSENT > UNRESPONSIVE > WARNING > OK`
+- 상위 상태 완화 금지: `ABSENT > ESCALATION > WARNING > OK`
 - ABSENT 상태에서 `throttle_limit = 0.0` 및 `mrm_active = true`
   - `throttle_limit = 0.0`은 **속도 0**이 아니라 **추가 종방향 출력 금지**를 뜻한다
   - `mrm_active = true`일 때 MRM 감속 모드(능동 제동) 즉시 활성화
   - 권장 감속도: `a_mrm_cmd <= -2.0 m/s^2` (플랫폼/브레이크 HW capability에 맞춰 캘리브레이션)
 - 상태 전이 시 `throttle_limit` 목표가 급변하면, 최종 인가값은 반드시 Rate Limiter 또는 LPF를 통과
   - 권장 예: `|d(throttle_limit_cmd)/dt| <= 0.1 /s`
+- Step B가 `reason in {unresponsive, intoxicated}`를 감지하면 현재 레벨과 무관하게 `driver_state=ABSENT`로 Step C에 전달한다.
+- Step C는 위 입력을 받으면 즉시 `MRM`을 수행한다.
+  - `reason=intoxicated`: `driver_override_lock=true` (오버라이드 잠금)
+  - `reason=unresponsive`: `driver_override_lock=false` (오버라이드 허용)
+
+규정 해석(critical 예외 경로):
+
+- 본 정책은 R171 5.5.4.2.6의 "경고 시퀀스는 일부 단계를 건너뛰거나 동시/억제/지연 제공 가능" 조항에 따라,
+  `unresponsive/intoxicated`를 safety-concept critical 예외로 분류해 단계 건너뛰기를 허용한다.
 
 ---
 
@@ -177,8 +200,8 @@ LKAS 시작 조건(Stand-by/Inactive -> Stand-by/Passive 진입 조건):
 |---|---|---|---|
 | `phone` | WARNING+ | 제어값 추가 보수화 없음(Core 유지) | "전방주시 필요(휴대폰 감지)" + 비프 주기 단축 |
 | `drowsy` | WARNING+ | `throttle_limit` 추가 10% 보수화 | "졸음 경고, 즉시 주시" + 휴식 유도 문구 |
-| `unresponsive` | UNRESPONSIVE/ABSENT | Core 완화 금지 | "반응 없음, 감속/정지 유도" |
-| `intoxicated` | WARNING+ | `throttle_limit` 추가 20% 보수화 | "음주 의심, 즉시 안전 인수" + 강한 반복 경고 |
+| `unresponsive` | 모든 상태(입력 시 Step B가 ABSENT로 전달) | 즉시 MRM, 오버라이드 허용 | "반응 없음, 안전 정지 절차 진행" + 수동 인수 가능 고지 |
+| `intoxicated` | 모든 상태(입력 시 Step B가 ABSENT로 전달) | 즉시 MRM, 오버라이드 잠금 | "비정상 주행 감지, 시스템이 차량을 안전 정지" + 오버라이드 잠금 고지 |
 | `none/unknown` | 모든 상태 | Core만 적용 | 일반 eyes-on 경고 |
 
 Overlay 불변식:
@@ -196,10 +219,9 @@ Overlay 불변식:
 | 단계 | Step B 상태 기준 | Step C HMI 요구 |
 |---|---|---|
 | Stage 0 | `OK` | 정보성 표시만 |
-| Stage 1 | `WARNING` 초기 | EOR: 연속 시각 + 음향/햅틱 최소 1개 |
-| Stage 2 | `WARNING` 지속 | 에스컬레이션: 강도 증가(반복/증폭) |
-| Stage 3 | `UNRESPONSIVE` | **DCA: "즉시 수동 인수" 명령형 경고(즉시 표시)** |
-| Stage 4 | `ABSENT` | MRM (Minimum Risk Maneuver) + 최대 경고 |
+| Stage 1 | `WARNING` | EOR: 연속 시각 + 음향/햅틱 최소 1개 |
+| Stage 2 | `ESCALATION` | **DCA + 강도 증가(반복/증폭, 맥락 맞춤 대응)** |
+| Stage 3 | `ABSENT` | MRM (Minimum Risk Maneuver) + 최대 경고 |
 
 ### 6.1 `hmi_action` 표시 내용 표준 (필수)
 
@@ -213,9 +235,9 @@ Overlay 불변식:
 | `hmi_action` | 트리거 조건 | 표시 텍스트(기본) | 표시/알림 강도 | 해제 조건 |
 |---|---|---|---|---|
 | `INFO` | `driver_state=OK` 일반 주행 | "시스템 정상 대기/주행" | 정보성 시각 표시만 | 상태 악화 시 상위 레벨로 즉시 승격 |
-| `INFO` | `driver_override=true` 이후 재개 대기 | **"자동 재개 없음, 운전자 의도 조작 필요"** | 정보성 시각 표시 + 고정 배너 권장 | 운전자 명시 조작으로 재활성화 완료 시 |
-| `EOR` | `driver_state=WARNING` (초기/지속) | "전방 주시 필요" / "핸들을 잡아주세요" | 연속 시각 + 음향/햅틱(최소 1개), 지속 시 반복/증폭 | Step C 내부 타이머 `recover_elapsed>=200ms` 시 경고 채널 완화 가능(상태 유지), Step B 복귀(`OK`) 시 완전 해제 |
-| `DCA` | `driver_state=UNRESPONSIVE` | **"즉시 수동 인수"** | 명령형 최대 가시성 + 강한 반복 음향/햅틱 | 운전자 인수 확인(`driver_override=true`) 또는 `MRM` 승격 |
+| `INFO` | `driver_override=true` 이후 시스템 OFF 상태 | **"수동 인수 확인 - 시스템 OFF, 자동 재개 없음"** | 정보성 시각 표시 + 고정 배너 권장 | 운전자 명시 `ON` 조작으로 재활성화 완료 시 |
+| `EOR` | `driver_state=WARNING` | "전방 주시 필요" / "핸들을 잡아주세요" | 연속 시각 + 음향/햅틱(최소 1개) | Step C 내부 타이머 `recover_elapsed>=200ms` 시 경고 채널 완화 가능(상태 유지), Step B 복귀(`OK`) 시 완전 해제 |
+| `DCA` | `driver_state=ESCALATION` 및 `reason ∉ {unresponsive, intoxicated}` | **"즉시 수동 인수"** | 명령형 최대 가시성 + 강한 반복 음향/햅틱 + 맥락 맞춤 강도 증가 | 운전자 인수 확인(`driver_override=true`) 또는 `MRM` 승격 |
 | `MRM` | `driver_state=ABSENT` 또는 `mrm_active=true` | **"운전자 부재 - 안전 정지 중"** | 최대 경고(시각/음향/햅틱) + 진행 상태 고정 표시 | run cycle 정책상 자동 해제 금지(수동/재시동 정책 따름) |
 
 문구 구성 규칙:
@@ -229,53 +251,62 @@ Overlay 불변식:
 |---|---|---|---|---|
 | `Phone` | 정신은 멀쩡하나 시선과 인지가 다른 곳에 쏠린 시각/수동적 주의태만 | 짧은 직접 명령 + 즉시 반복 + HUD 활용 | 일반적인 경고 대신 행동을 명시하는 명령형 문구를 사용하고, 첫 경고를 놓치지 않도록 짧은 주기로 반복한다. 시각 경고는 계기판보다 전방 시야(HUD)에 띄운다. | `"휴대폰 사용 중단. 전방 주시."` (HUD 시각 경고 + 음성 동시 출력) |
 | `Drowsy` | 각성 수준 저하, 판단력/반응 속도 저하, 눈을 감고 있을 확률이 높은 생리적 졸음운전 | 다중 감각 각성 유도(참신성) + 행동 전환(휴식) 유도 | 시각보다 청각과 햅틱(진동)을 우선 사용한다. 동일 패턴 반복으로 인한 습관화를 피하기 위해 무작위 경고음 또는 패턴 변화를 적용하고, 반드시 휴식 행동으로 이어지게 2단계로 안내한다. | `(무작위 패턴의 경고음 + 시트 진동) "졸음 감지. 즉시 전방 주시 후 안전한 위치에서 휴식하십시오."` |
-| `Intoxicated` | 전두엽 기능 저하로 위험 인지가 왜곡되고 복잡한 메시지 이해가 어려운 화학적 손상/비정상 주행 | HMI 설득 포기 + 즉각적인 차량 제어권 박탈(MRM 직행) + 상태 고지 | 손실 프레이밍이나 수동 takeover 요구는 생략하고, 시스템이 즉시 조향과 감속을 강제 통제하여 안전 정차(MRM)를 실행한다. HMI는 행동 촉구가 아니라 단호한 상태 고지만 수행한다. | `(강제 감속 및 조향 개입과 함께) "비정상 주행 감지. 시스템이 차량을 강제 정차합니다."` |
-| `Unresponsive` | 운전자와의 상호작용이 완전히 불가능하여 시스템이 주도권을 쥐어야 하는 무반응/의식 상실 상태 | MRM(최소 위험 기동) 실행 + 시청각 동시 제공을 통한 상태 고지 | 시스템은 즉시 안전 지대나 갓길로 차량을 세우는 MRM을 실행한다. 운전자가 기동 중 의식을 회복할 경우를 대비해 시각과 음성을 단계적이 아니라 동시에 명확하게 제공한다. | `"반응 없음. 안전 정지 절차를 진행합니다."` (시각 고지, 비상등 점등, eCall 활성화 동시 진행) |
+| `Intoxicated` | 위험 인지 저하/비정상 주행으로 수동 인수 신뢰가 낮은 상태 | 즉시 MRM + 운전자 오버라이드 잠금 | Step B가 `ABSENT + intoxicated`를 전달하면 Step C는 지체 없이 MRM을 실행하고, `driver_override_lock=true`를 적용한다. | `"비정상 주행 감지. 시스템이 차량을 안전 정지합니다."` + `"수동 인수 잠금"` |
+| `Unresponsive` | 무반응/의식 없음으로 즉시 최소위험정지가 필요한 상태 | 즉시 MRM + 운전자 오버라이드 허용 | Step B가 `ABSENT + unresponsive`를 전달하면 Step C는 즉시 MRM을 실행하되, 운전자 의식 회복 가능성을 고려해 `driver_override_lock=false`를 유지한다. | `"반응 없음. 안전 정지 절차를 진행합니다."` + `"수동 인수 가능"` |
 
 정합 조건:
 
-- Stage 전환 시점은 Step B 규정 앵커(5s/3s/5s/10s)와 반드시 동기화한다.
-- 경고 채널 충돌 시 emergency 시스템 경고를 우선 표시한다.
+- 동일 시점 다중 HMI 요청 충돌은 `MRM > DCA > EOR > INFO` 우선순위로 해소한다.
 
 ---
 
-## 7) 충돌 해소(Arbitration) 및 Fail-safe
+## 7) Fail-safe 및 운영 규칙
 
-### 7.1 다중 시스템 우선순위 (향후 AEBS 추가 시)
-
-**현재 (LKAS만):** 해당 사항 없음
-
-**향후 AEBS 추가 시:**
-- `aeb_active=true`면:
-  - Step C HMI를 보조 채널로 격하(메인 경고는 AEBS)
-  - 종방향(`throttle_limit`)은 더 보수적인 값 선택(`min` 규칙)
-
-### 7.2 stale/fault 처리 (프로토타입 v0)
+### 7.1 stale/fault 처리 (프로토타입 v0)
 
 - 프로토타입 v0에서는 `input_stale`를 정책 분기 조건으로 사용하지 않는다.
 - stale/fault fail-safe는 v1 안전강화 단계에서 활성화한다.
 
-### 7.3 경계/종료 controllability
+### 7.2 경계/종료 controllability
 
 - 시스템 종료/경계 초과/오류 상황에서도 급격한 종방향 변화 금지
 - 조향은 LKAS 원출력을 유지하고, DCAS는 종방향 제한 및 HMI/긴급 상태만 중재
 
-### 7.4 LKAS 시작 전제조건/기동 통지 fail-safe
+### 7.3 LKAS 시작 전제조건 fail-safe
 
 - `driver_state != OK` 또는 `notebook_input_alive=false`면:
   - `lkas_mode`를 `ON_ACTIVE`로 승격하지 않는다(`ON_INACTIVE` 또는 `OFF` 유지).
   - 운전자 개입 요구는 `hmi_action`을 통해 최소 `EOR` 이상으로 유지한다.
-- 시스템 주도 기동인데 `manoeuvre_notice_lead_s < 3.0s`이면:
-  - `manoeuvre_state=PRE_ANNOUNCED/IN_PROGRESS` 전환을 금지하고,
-  - `next_manoeuvre_type=NONE`, `next_manoeuvre_eta_s=null`로 강등하여 오인 가능성을 차단하고,
-  - 대시보드에 "기동 사전 통지 부족" 경고를 출력한다.
 
-### 7.5 DCA 인수/운전자 부재 응답 이후 재활성화 규칙
+### 7.3.1 수동 인수(`driver_override`) 시 비활성화 범위
+
+- `driver_override=true`가 유효하게 들어오고 `driver_override_lock=false`이면, DCAS는 **제어 권한 경로(control-authority path)** 를 즉시 비활성화한다.
+- 단, 같은 주기에 `lkas_switch_event`가 들어오면 `lkas_switch_event` 처리 결과를 우선 반영한 뒤 `driver_override`를 평가한다.
+- 비활성화 범위는 아래 3가지를 포함한다.
+  - `lkas_mode=OFF`로 강등하여 LKAS/DCAS 자동 제어 재개를 금지
+  - `mrm_active=false`로 내려 자동 감속/기동 명령을 중단
+  - `hmi_action=INFO`로 전환하고 "수동 인수 확인 - 시스템 OFF"를 고정 표시
+- 단, 아래 **감시/기록 경로(observer path)** 는 계속 유지한다.
+  - `driver_override` 입력 수신
+  - `driver_override_lock` / `mrm_activation_count_run_cycle` / lockout 래치 유지
+  - reason/state 로그 기록
+- 따라서 "DCAS 시스템 자체 비활성화"는 **자동 제어 출력 경로만 OFF** 하는 의미이며, 오버라이드 입력을 포함한 안전 감시 경로는 run cycle 종료 전까지 살아 있어야 한다.
+- `driver_override_lock=true`인 경우(`ABSENT + intoxicated`)에는 위 비활성화 규칙을 적용하지 않고, MRM을 유지한다.
+
+### 7.4 DCA 인수/운전자 부재 응답 이후 재활성화 규칙 (비-critical 경로 전용)
+
+- 사전 규칙:
+  - Step B가 `reason in {unresponsive, intoxicated}`를 감지하면 `driver_state=ABSENT`로 Step C에 전달한다.
+  - Step C는 즉시 MRM을 수행한다.
+    - `reason=intoxicated` -> `driver_override_lock=true`
+    - `reason=unresponsive` -> `driver_override_lock=false`
+  - 따라서 아래 DCA 시나리오 A/B는 `reason ∉ {unresponsive, intoxicated}`인 비-critical ESCALATION 경로에만 적용한다.
 
 - 시나리오 A: DCA 직후 운전자가 직접 인수(`driver_override=true`)
   - DCA는 즉시 해제한다(요청 확인 완료).
-  - 시스템은 `ON_ACTIVE`를 유지하지 않고 `ON_PASSIVE`, `ON_INACTIVE` 또는 `OFF`로 전환한다.
-  - 주행 보조 재개는 반드시 운전자 의도 조작으로만 허용한다(자동 재개 금지).
+  - 시스템은 즉시 `OFF`로 전환하고, 자동 제어 출력 경로를 중단한다.
+  - 감시/로그/lockout 경로는 유지한다.
+  - 주행 보조 재개는 반드시 운전자 명시 `ON` 조작으로만 허용한다(자동 재개 금지).
 
 - 시나리오 B: DCA 미응답으로 ABSENT 진입 (MRM 활성화)
   - 해당 이벤트를 `mrm_activation_count_run_cycle`로 누적 관리한다.
@@ -291,12 +322,12 @@ Overlay 불변식:
 
 대시보드 송신 필드:
 
-- `lkas_mode` (`OFF/ON_INACTIVE/ON_PASSIVE/ON_ACTIVE`)
+- `lkas_mode` (`OFF/ON_INACTIVE/ON_ACTIVE`)
 - `current_manoeuvre_type` (`NONE/CURVE_FOLLOW/LANE_CHANGE/TURN/MRM`)
-- `next_manoeuvre_type` (`NONE/CURVE_FOLLOW/LANE_CHANGE/TURN/MRM`)
-- `next_manoeuvre_eta_s` (초, 없으면 `null`)
 - `hmi_action` (상태별 경고/안내: INFO/EOR/DCA/MRM)
 - `mrm_active` (`true/false`): ABSENT 상태일 때 `true`
+- `driver_override_lock` (`true/false`): `driver_state=ABSENT and reason=intoxicated`일 때 `true`
+  - `true`로 설정되면 프로그램(run cycle) 종료 전까지 유지한다.
 
 ---
 
@@ -312,7 +343,7 @@ Overlay 불변식:
 
 | 항목 | 분류 | 근거 강도 | 비고 |
 |---|---|---|---|
-| 다중모달 EOR/DCA 요구 | 확정값 | A | UNECE R171 5.5.4.2.3.2~3[^c1] |
+| 다중모달 EOR/DCA 요구(`unresponsive/intoxicated`의 Step B 즉시 ABSENT 전달 후 MRM 수행 포함) | 확정값 | A | UNECE R171 5.5.4.2.3.2~3[^c1] |
 | controllable termination 보장 | 확정값 | A | UNECE R171 5.3.5.2.1[^c1] |
 | 상태별 throttle 비율값 | 가정값 | C | JetRacer baseline, 플랫폼별 재튜닝 |
 | reason overlay 보수화 | 가정값 | C | 운영 안정성 가정 |
@@ -323,82 +354,87 @@ Overlay 불변식:
 
 ## 9) 구현 인터페이스
 
-```python
-def evaluate_policy(
-    driver_state: DriverState,
-    reason: Reason,
-    lkas_throttle: float,
-    active_reason_set: set[Reason] | None = None,
-    representative_reason: Reason | None = None,
-    lkas_mode: str = "OFF",
-    current_manoeuvre_type: str = "NONE",
-    next_manoeuvre_type: str = "NONE",
-    next_manoeuvre_eta_s: float | None = None,
-    reason_context_source: str = "step_b_bridge"
-) -> PolicyOutput:
-    """
-    상태에 따라 제어값, HMI, MRM 활성 여부 결정
-    """
-    # 상태별 기본값
-    policy_map = {
-        DriverState.OK: (1.00, "INFO", False),
-        DriverState.WARNING: (0.60, "EOR", False),
-        DriverState.UNRESPONSIVE: (0.20, "DCA", False),
-        DriverState.ABSENT: (0.0, "MRM", True),
-    }
-    
-    ratio, hmi, mrm_active = policy_map.get(driver_state, (1.0, "INFO", False))
+> 아래 코드는 참고용 C++ 스타일 예시이며, 구현 계약의 유일한 기준은 아니다.
 
-    # reason overlay (prototype v0)
-    reason_overlay = {
-        "phone": 1.00,
-        "drowsy": 0.90,
-        "unresponsive": 1.00,
-        "intoxicated": 0.80,
-        "unknown": 1.00,
-        "none": 1.00,
-    }
+```cpp
+PolicyOutput EvaluatePolicy(
+    DriverState driver_state,
+    Reason reason,
+    float lkas_throttle,
+    bool notebook_input_alive = true,
+    bool driver_override = false,
+    bool driver_override_lock_latched = false,
+    int mrm_activation_count_run_cycle = 0,
+    LkasSwitchEvent lkas_switch_event = LkasSwitchEvent::NONE,
+    LkasMode lkas_mode = LkasMode::OFF,
+    ManoeuvreType current_manoeuvre_type = ManoeuvreType::NONE,
+    ReasonContextSource reason_context_source = ReasonContextSource::STEP_B_BRIDGE) {
+  const auto [ratio, base_hmi, base_mrm_active] = GetPolicyBase(driver_state);
+  auto hmi = base_hmi;
+  auto mrm_active = base_mrm_active;
+  auto driver_override_lock = driver_override_lock_latched;
 
-    # multi-context resolution
-    reasons = set(active_reason_set or [])
-    if not reasons:
-        reasons.add(representative_reason or reason)
+  const Reason resolved_reason = NormalizeReason(reason);
+  const float overlay_gain = GetReasonOverlayGain(resolved_reason);
 
-    priority = ["unresponsive", "intoxicated", "drowsy", "phone", "unknown", "none"]
-    resolved_representative_reason = next(
-        (reason_item for reason_item in priority if reason_item in reasons),
-        "none",
-    )
+  if (driver_state == DriverState::ABSENT &&
+      (resolved_reason == Reason::INTOXICATED || resolved_reason == Reason::UNRESPONSIVE)) {
+    hmi = HmiAction::MRM;
+    mrm_active = true;
+    driver_override_lock = driver_override_lock || (resolved_reason == Reason::INTOXICATED);
+  }
 
-    overlay_gain = reason_overlay.get(resolved_representative_reason, 1.00)
+  if (lkas_switch_event == LkasSwitchEvent::OFF) {
+    lkas_mode = LkasMode::OFF;
+  } else if (lkas_switch_event == LkasSwitchEvent::ON &&
+             driver_state == DriverState::OK && notebook_input_alive) {
+    lkas_mode = LkasMode::ON_ACTIVE;
+  } else if (lkas_switch_event == LkasSwitchEvent::ON) {
+    lkas_mode = LkasMode::ON_INACTIVE;
+  }
 
-    throttle_limit = ratio * overlay_gain * lkas_throttle
+  if (lkas_mode == LkasMode::ON_ACTIVE &&
+      (driver_state != DriverState::OK || !notebook_input_alive)) {
+    lkas_mode = LkasMode::ON_INACTIVE;
+  }
 
-    dashboard_state = {
-        "lkas_mode": lkas_mode,
-        "current_manoeuvre_type": current_manoeuvre_type,
-        "next_manoeuvre_type": next_manoeuvre_type,
-        "next_manoeuvre_eta_s": next_manoeuvre_eta_s,
-        "hmi_action": hmi,
-        "reason_context_source": reason_context_source,
-        "active_reason_set": sorted(reasons),
-        "representative_reason": resolved_representative_reason,
-    }
-    
-    return PolicyOutput(
-        throttle_limit=throttle_limit,
-        hmi_action=hmi,
-        mrm_active=mrm_active,
-        dashboard_state=dashboard_state
-    )
+  if (driver_override && !driver_override_lock) {
+    lkas_mode = LkasMode::OFF;
+    hmi = HmiAction::INFO;
+    mrm_active = false;
+  }
+
+  float throttle_limit = ratio * overlay_gain * lkas_throttle;
+  if (lkas_mode == LkasMode::OFF) {
+    throttle_limit = 0.0f;
+  }
+
+  return BuildPolicyOutput(
+      throttle_limit,
+      hmi,
+      mrm_active,
+      driver_override_lock,
+      lkas_mode,
+      current_manoeuvre_type,
+      reason_context_source,
+      resolved_reason,
+      mrm_activation_count_run_cycle);
+}
 ```
 
 권장 단위 테스트:
 
 - **상태 단조성**: 상위 상태(`ABSENT`)에서 `throttle_limit`이 하위 상태보다 작거나 같음
-- **MRM 활성**: `driver_state=ABSENT`일 때만 `mrm_active=true`
+- **MRM 활성**: `driver_state=ABSENT`일 때 `mrm_active=true`
+- **오버라이드 잠금 분기**: `driver_state=ABSENT`에서 `reason=intoxicated`면 `driver_override_lock=true`, `reason=unresponsive`면 `false`
+- **오버라이드 잠금 유지**: `driver_override_lock=true`가 되면 프로그램(run cycle) 종료 전까지 유지되는지 확인
+- **Step B->Step C 계약(critical-1)**: `ABSENT + intoxicated` 입력 시 즉시 `hmi_action=MRM`, `mrm_active=true`, `driver_override_lock=true`
+- **Step B->Step C 계약(critical-2)**: `ABSENT + unresponsive` 입력 시 즉시 `hmi_action=MRM`, `mrm_active=true`, `driver_override_lock=false`
+- **수동 인수 OFF 전환**: `driver_override=true and driver_override_lock=false`면 `lkas_mode=OFF`, `hmi_action=INFO`, `mrm_active=false`로 전환되는지 확인
+- **잠금 상태 오버라이드 무시**: `driver_override=true and driver_override_lock=true`면 `MRM`이 유지되고 `OFF`로 전환되지 않는지 확인
+- **입력 검증/폴백**: `reason`이 부재/비정상이면 `unknown`으로 정규화되는지 확인
 - **reason 처리**: `reason=intoxicated`에서 Overlay 보수화 규칙이 적용되는지 확인
-- **다중 맥락 처리**: `active_reason_set={drowsy,intoxicated}`일 때 `representative_reason=intoxicated`로 선택되고 해당 gain이 적용되는지 확인
+- **현재 주기 reason 반영**: 매 주기 현재 계산에 사용한 `reason` 1개만 정책 계산에 사용되는지 확인
 - **비율 적용**: 각 상태별 비율값이 정확히 적용되는지 확인
 
 ---
