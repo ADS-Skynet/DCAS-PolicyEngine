@@ -1,0 +1,19 @@
+Start testing: Apr 22 18:04 CEST
+----------------------------------------------------------
+1/1 Testing: dcas_policy_tests
+1/1 Test: dcas_policy_tests
+Command: "/home/leo/ads-skynet/DCAS-PolicyEngine/build/dcas_policy_tests"
+Directory: /home/leo/ads-skynet/DCAS-PolicyEngine/build
+"dcas_policy_tests" start time: Apr 22 18:04 CEST
+Output:
+----------------------------------------------------------
+[PASS] All policy tests passed
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"dcas_policy_tests" end time: Apr 22 18:04 CEST
+"dcas_policy_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Apr 22 18:04 CEST
