@@ -187,7 +187,6 @@
 ### 3.2 복귀 규칙 가드 (핵심)
 
 - 기본 복귀: `is_attentive=yes` 연속 유지 `>= T_recover_hold`이면 `next_state=OK` (단, ABSENT 래치가 없는 경우)
-- `unresponsive` 맥락이라도 WARNING/ESCALATION 구간에서는 위 조건을 만족하면 복귀를 허용한다.
 - 어떤 이유로든 `ABSENT`에 도달하면 `absent_latched_run_cycle=true`로 고정하고, 같은 run cycle에서는 `OK`로 복귀하지 않는다.
 
 ---
@@ -257,13 +256,13 @@
 | ESCALATION | `inattentive_elapsed >= T_absent_eff` | ABSENT | reason 타이머 보정 없음 |
 | ABSENT | ANY | ABSENT 유지 | `absent_latched_run_cycle=true`, 같은 run cycle 하향 금지 |
 | WARNING/ESCALATION | `200ms <= recover_elapsed < T_recover_hold` | 현재 상태 유지 | 재참여 확인(경고 해제 가능), 상태 하향 금지 |
-| WARNING/ESCALATION | `is_attentive=yes` 연속 유지 `>= T_recover_hold` | OK | 맥락 종류와 무관하게 복귀 허용 |
+| WARNING/ESCALATION | `is_attentive=yes` 연속 유지 `>= T_recover_hold` | OK | 비-critical 맥락 경로에서 복귀 허용 |
 | ANY | `input_stale=true` 또는 입력 누락 | stale fail-safe | 맥락 상관없이 최상 유지 |
 
 **복귀 규칙 상세:**
 
 - 기본 복귀: `is_attentive=yes` 연속 유지 `>= T_recover_hold`이면 `next_state=OK` (WARNING/ESCALATION 한정)
-- `unresponsive` 맥락에서도 WARNING/ESCALATION 구간에서는 위 조건을 만족하면 복귀를 허용한다.
+- `unresponsive/intoxicated`는 현재 계산 주기에서 critical이면 즉시 `ABSENT`로 상향되므로, 해당 주기에는 WARNING/ESCALATION 복귀 경로를 적용하지 않는다.
 - 단, `ABSENT` 도달 이력이 있으면 같은 run cycle에서는 `OK` 복귀를 금지한다.
 
 ### 6.1 맥락 수신 흐름 (인지팀 주도 VLM)
