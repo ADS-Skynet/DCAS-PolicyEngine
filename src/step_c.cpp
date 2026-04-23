@@ -1,103 +1,86 @@
 #include "dcas_policy_engine/step_c.hpp"
 
 #include <algorithm>
-#include <array>
 
 namespace dcas {
 namespace {
 
-Reason resolve_representative_reason(const StepCInput& input, std::vector<Reason>& normalized_set) {
-    std::array<Reason, 6> priority = {
-        Reason::UNRESPONSIVE,
-        Reason::INTOXICATED,
-        Reason::DROWSY,
-        Reason::PHONE,
-        Reason::UNKNOWN,
-        Reason::NONE,
-    };
-
-    normalized_set = input.active_reason_set;
-    if (normalized_set.empty()) {
-        if (input.representative_reason.has_value()) {
-            normalized_set.push_back(*input.representative_reason);
-        } else {
-            normalized_set.push_back(input.reason);
-        }
+LkasMode ApplySwitchEvent(LkasMode current_mode, LkasSwitchEvent event) {
+    switch (event) {
+        case LkasSwitchEvent::ON:
+            return current_mode == LkasMode::OFF ? LkasMode::ON_INACTIVE : current_mode;
+        case LkasSwitchEvent::OFF:
+            return LkasMode::OFF;
+        case LkasSwitchEvent::NONE:
+            return current_mode;
     }
-
-    for (Reason candidate : priority) {
-        if (std::find(normalized_set.begin(), normalized_set.end(), candidate) != normalized_set.end()) {
-            return candidate;
-        }
-    }
-    return Reason::UNKNOWN;
+    return current_mode;
 }
 
-double base_gain_from_state(DriverState state) {
+double BaseThrottleGain(DriverState state) {
     switch (state) {
         case DriverState::OK: return 1.0;
-        case DriverState::WARNING: return 0.6;
-        case DriverState::ESCALATION: return 0.2;
+        case DriverState::WARNING: return 0.7;
+        case DriverState::ESCALATION: return 0.3;
         case DriverState::ABSENT: return 0.0;
     }
     return 0.0;
 }
 
-double overlay_gain_from_reason(Reason reason) {
-    switch (reason) {
-        case Reason::DROWSY: return 0.9;
-        case Reason::INTOXICATED: return 0.8;
-        default: return 1.0;
-    }
-}
-
 }  // namespace
 
-StepCOutput evaluate_step_c(const StepCInput& input) {
+StepCOutput StepCPolicyEngine::Evaluate(const StepCInput& input) const {
     StepCOutput output{};
-    output.driver_override_lock = input.driver_override_lock_latched;
+    output.next_latched_state = input.latched_state;
 
-    std::vector<Reason> reasons;
-    output.representative_reason = resolve_representative_reason(input, reasons);
-    output.active_reason_set = reasons;
+    output.next_lkas_mode = ApplySwitchEvent(input.previous_lkas_mode, input.lkas_switch_event);
 
-    if (input.driver_override && !output.driver_override_lock) {
+    if (input.lkas_switch_event == LkasSwitchEvent::ON &&
+        input.driver_state == DriverState::OK &&
+        input.notebook_input_alive) {
+        output.next_lkas_mode = LkasMode::ON_ACTIVE;
+    }
+
+    if (output.next_lkas_mode == LkasMode::ON_ACTIVE &&
+        (input.driver_state != DriverState::OK || !input.notebook_input_alive)) {
+        output.next_lkas_mode = LkasMode::ON_INACTIVE;
+    }
+
+    if (input.driver_override && !output.next_latched_state.driver_override_lock) {
+        output.next_lkas_mode = LkasMode::OFF;
         output.throttle_limit = 0.0;
         output.hmi_action = HmiAction::INFO;
         output.mrm_active = false;
-        return output;
-    }
-
-    const double base = base_gain_from_state(input.driver_state);
-    const double overlay = overlay_gain_from_reason(output.representative_reason);
-    output.throttle_limit = std::max(0.0, input.lkas_throttle * base * overlay);
-
-    if (input.driver_state == DriverState::ABSENT) {
-        output.throttle_limit = 0.0;
-        output.hmi_action = HmiAction::MRM;
-        output.mrm_active = true;
-        if (output.representative_reason == Reason::INTOXICATED) {
-            output.driver_override_lock = true;
+    } else {
+        output.throttle_limit = std::max(0.0, input.lkas_throttle * BaseThrottleGain(input.driver_state));
+        switch (input.driver_state) {
+            case DriverState::OK:
+                output.hmi_action = HmiAction::INFO;
+                break;
+            case DriverState::WARNING:
+                output.hmi_action = input.reengagement_confirmed_200ms ? HmiAction::INFO : HmiAction::EOR;
+                break;
+            case DriverState::ESCALATION:
+                output.hmi_action = HmiAction::DCA;
+                break;
+            case DriverState::ABSENT:
+                output.hmi_action = HmiAction::MRM;
+                output.mrm_active = true;
+                output.throttle_limit = 0.0;
+                ++output.next_latched_state.mrm_activation_count_run_cycle;
+                break;
         }
-        return output;
     }
 
-    output.mrm_active = false;
-    switch (input.driver_state) {
-        case DriverState::OK:
-            output.hmi_action = HmiAction::INFO;
-            break;
-        case DriverState::WARNING:
-            output.hmi_action = HmiAction::EOR;
-            break;
-        case DriverState::ESCALATION:
-            output.hmi_action = HmiAction::DCA;
-            break;
-        case DriverState::ABSENT:
-            output.hmi_action = HmiAction::MRM;
-            break;
+    if (output.next_latched_state.mrm_activation_count_run_cycle >= 2) {
+        output.next_latched_state.driver_override_lock = true;
+        output.next_lkas_mode = LkasMode::OFF;
     }
 
+    output.dashboard_state.driver_state = input.driver_state;
+    output.dashboard_state.reason = input.reason;
+    output.dashboard_state.lkas_mode = output.next_lkas_mode;
+    output.dashboard_state.current_manoeuvre_type = input.current_manoeuvre_type;
     return output;
 }
 

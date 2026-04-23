@@ -40,6 +40,7 @@ Step B 상태(`OK -> WARNING -> ESCALATION -> ABSENT`)를 입력받아,
 - `lkas_switch_event` (optional): `NONE | ON | OFF`
 - `lkas_mode` (optional): `OFF | ON_INACTIVE | ON_ACTIVE`
 - `notebook_input_alive` (optional): 노트북(인지 입력) 수신 유효 여부
+- `reengagement_confirmed_200ms` (optional): Step B가 계산한 200ms 재참여 확인 신호(EOR 완화용)
 - `manoeuvre_type` (optional): `NONE | CURVE_FOLLOW | LANE_CHANGE | TURN | MRM`
 - `reason_context_source` (optional): `perception_notebook | step_b_bridge` (맥락 입력 출처 추적용)
 
@@ -49,7 +50,7 @@ Step B 상태(`OK -> WARNING -> ESCALATION -> ABSENT`)를 입력받아,
 - 인지 흐름상 `is_attentive` 판단이 항상 기준 신호이며, Step B는 이를 authoritative input으로 사용한다.
 - `reason`은 `is_attentive=no`일 때 그 시점의 맥락 설명값으로만 사용한다.
 - 따라서 `is_attentive=yes`로 Step B가 정규화한 주기에서는, `reason`이 critical이어도 Step C는 이를 `none`으로 간주한 결과만 받는다.
-- `is_attentive_ts_ms`, `reason_ts_ms`는 Step C 판단용 입력이 아니라, perception 입력 정합성 확인/로그용 메타데이터다.
+- `is_attentive_ts_ms`, `reason_ts_ms`는 Step C 판단용 입력이 아니며, Step B의 **정규화 유효성 판정**에서만 사용된다.
 - Step C는 Step B가 실제 계산에 사용한 최종 `driver_state`와 `reason`만 소비한다.
 - Step C는 매 주기 입력된 `reason` 1개만 소비한다.
 - `reason`은 항상 Step B가 현재 계산 주기에 사용한 값만 유효하며, 이전 주기의 reason은 유지하지 않는다.
@@ -61,7 +62,8 @@ Step B 상태(`OK -> WARNING -> ESCALATION -> ABSENT`)를 입력받아,
 - `is_attentive=yes`로 정규화된 주기에서는 `reason=none`으로 함께 정규화한다.
 - Step C는 Step B가 정규화한 `reason` 1개를 그대로 overlay/HMI 판단에 사용한다.
 - 이전 주기의 reason은 누적하지 않으며, 현재 계산 주기의 reason만 유효하다.
-- `recover_elapsed`는 Step C HMI 모듈 내부 타이머 파라미터이며, 외부 인터페이스 입력 필드는 아니다.
+- `recover_elapsed` 자체는 Step C 외부 입력 필드가 아니다.
+- 대신 필요한 경우 Step B가 `reengagement_confirmed_200ms` bridge 신호를 출력하고, Step C는 그 신호만 소비한다.
 
 설계 원칙:
 
@@ -236,7 +238,7 @@ Overlay 불변식:
 |---|---|---|---|---|
 | `INFO` | `driver_state=OK` 일반 주행 | "시스템 정상 대기/주행" | 정보성 시각 표시만 | 상태 악화 시 상위 레벨로 즉시 승격 |
 | `INFO` | `driver_override=true` 이후 시스템 OFF 상태 | **"수동 인수 확인 - 시스템 OFF, 자동 재개 없음"** | 정보성 시각 표시 + 고정 배너 권장 | 운전자 명시 `ON` 조작으로 재활성화 완료 시 |
-| `EOR` | `driver_state=WARNING` | "전방 주시 필요" / "핸들을 잡아주세요" | 연속 시각 + 음향/햅틱(최소 1개) | Step C 내부 타이머 `recover_elapsed>=200ms` 시 경고 채널 완화 가능(상태 유지), Step B 복귀(`OK`) 시 완전 해제 |
+| `EOR` | `driver_state=WARNING` | "전방 주시 필요" / "핸들을 잡아주세요" | 연속 시각 + 음향/햅틱(최소 1개) | `reengagement_confirmed_200ms=true` 시 경고 채널 완화 가능(상태 유지), Step B 복귀(`OK`) 시 완전 해제 |
 | `DCA` | `driver_state=ESCALATION` 및 `reason ∉ {unresponsive, intoxicated}` | **"즉시 수동 인수"** | 명령형 최대 가시성 + 강한 반복 음향/햅틱 + 맥락 맞춤 강도 증가 | 운전자 인수 확인(`driver_override=true`) 또는 `MRM` 승격 |
 | `MRM` | `driver_state=ABSENT` 또는 `mrm_active=true` | **"운전자 부재 - 안전 정지 중"** | 최대 경고(시각/음향/햅틱) + 진행 상태 고정 표시 | run cycle 정책상 자동 해제 금지(수동/재시동 정책 따름) |
 
@@ -276,7 +278,8 @@ Overlay 불변식:
 
 - `driver_state != OK` 또는 `notebook_input_alive=false`면:
   - `lkas_mode`를 `ON_ACTIVE`로 승격하지 않는다(`ON_INACTIVE` 또는 `OFF` 유지).
-  - 운전자 개입 요구는 `hmi_action`을 통해 최소 `EOR` 이상으로 유지한다.
+  - 별도 fail-safe HMI 승격은 요구하지 않는다.
+  - 즉, `hmi_action`은 오직 현재 `driver_state` 기준으로만 결정한다.
 
 ### 7.3.1 수동 인수(`driver_override`) 시 비활성화 범위
 

@@ -1,30 +1,41 @@
 #pragma once
 
+#include "dcas_policy_engine/perception_adapter.hpp"
+#include "dcas_policy_engine/speed_band_estimator.hpp"
+#include "dcas_policy_engine/state_timer_store.hpp"
+#include "dcas_policy_engine/threshold_scheduler.hpp"
 #include "dcas_policy_engine/types.hpp"
 
 namespace dcas {
 
 struct StepBInput {
-    DriverState current_state{DriverState::OK};
-    bool is_attentive{true};
-    Reason reason{Reason::NONE};
-    double inattentive_elapsed_s{0.0};
-    double recover_elapsed_s{0.0};
-    bool absent_latched_run_cycle{false};
-    bool input_stale{false};
-
-    double t_warn_eff_s{2.0};
-    double t_esc_eff_s{4.0};
-    double t_absent_eff_s{8.0};
-    double t_recover_hold_s{1.2};
+    PerceptionInput perception{};
+    double ego_speed_mps{0.0};
+    double delta_s{0.0};
+    bool stale_fail_safe_enabled{false};
 };
 
 struct StepBOutput {
     DriverState next_state{DriverState::OK};
-    Reason reason_used{Reason::NONE};
+    Reason reason{Reason::NONE};
     bool absent_latched_run_cycle{false};
+    std::int64_t input_snapshot_ts_ms{0};
+    bool reengagement_confirmed_200ms{false};
 };
 
-StepBOutput evaluate_step_b(const StepBInput& input);
+class StepBTransitionEngine {
+public:
+    explicit StepBTransitionEngine(
+        PerceptionAdapter adapter = {},
+        SpeedBandEstimator speed_band_estimator = {},
+        ThresholdScheduler threshold_scheduler = {});
+
+    StepBOutput Evaluate(const StepBInput& input, StateTimerStore& state_store) const;
+
+private:
+    PerceptionAdapter adapter_{};
+    SpeedBandEstimator speed_band_estimator_{};
+    ThresholdScheduler threshold_scheduler_{};
+};
 
 }  // namespace dcas

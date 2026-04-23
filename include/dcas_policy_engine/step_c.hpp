@@ -1,8 +1,5 @@
 #pragma once
 
-#include <optional>
-#include <vector>
-
 #include "dcas_policy_engine/types.hpp"
 
 namespace dcas {
@@ -10,24 +7,28 @@ namespace dcas {
 struct StepCInput {
     DriverState driver_state{DriverState::OK};
     Reason reason{Reason::NONE};
-    double lkas_throttle{0.0};
-
-    std::vector<Reason> active_reason_set{};
-    std::optional<Reason> representative_reason{};
-
+    bool notebook_input_alive{true};
     bool driver_override{false};
-    bool driver_override_lock_latched{false};
+    double lkas_throttle{0.0};
+    LkasMode previous_lkas_mode{LkasMode::OFF};
+    LkasSwitchEvent lkas_switch_event{LkasSwitchEvent::NONE};
+    bool reengagement_confirmed_200ms{false};
+    ManoeuvreType current_manoeuvre_type{ManoeuvreType::NONE};
+    StepCLatchedState latched_state{};
 };
 
 struct StepCOutput {
     double throttle_limit{0.0};
     HmiAction hmi_action{HmiAction::INFO};
     bool mrm_active{false};
-    bool driver_override_lock{false};
-    Reason representative_reason{Reason::UNKNOWN};
-    std::vector<Reason> active_reason_set{};
+    LkasMode next_lkas_mode{LkasMode::OFF};
+    DashboardState dashboard_state{};
+    StepCLatchedState next_latched_state{};
 };
 
-StepCOutput evaluate_step_c(const StepCInput& input);
+class StepCPolicyEngine {
+public:
+    StepCOutput Evaluate(const StepCInput& input) const;
+};
 
 }  // namespace dcas

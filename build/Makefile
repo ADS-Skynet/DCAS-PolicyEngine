@@ -189,6 +189,30 @@ src/main.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/dcas_policy_runner.dir/build.make CMakeFiles/dcas_policy_runner.dir/src/main.cpp.s
 .PHONY : src/main.cpp.s
 
+src/policy_runtime.o: src/policy_runtime.cpp.o
+.PHONY : src/policy_runtime.o
+
+# target to build an object file
+src/policy_runtime.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/dcas_policy_engine.dir/build.make CMakeFiles/dcas_policy_engine.dir/src/policy_runtime.cpp.o
+.PHONY : src/policy_runtime.cpp.o
+
+src/policy_runtime.i: src/policy_runtime.cpp.i
+.PHONY : src/policy_runtime.i
+
+# target to preprocess a source file
+src/policy_runtime.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/dcas_policy_engine.dir/build.make CMakeFiles/dcas_policy_engine.dir/src/policy_runtime.cpp.i
+.PHONY : src/policy_runtime.cpp.i
+
+src/policy_runtime.s: src/policy_runtime.cpp.s
+.PHONY : src/policy_runtime.s
+
+# target to generate assembly for a file
+src/policy_runtime.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/dcas_policy_engine.dir/build.make CMakeFiles/dcas_policy_engine.dir/src/policy_runtime.cpp.s
+.PHONY : src/policy_runtime.cpp.s
+
 src/step_b.o: src/step_b.cpp.o
 .PHONY : src/step_b.o
 
@@ -276,6 +300,9 @@ help:
 	@echo "... src/main.o"
 	@echo "... src/main.i"
 	@echo "... src/main.s"
+	@echo "... src/policy_runtime.o"
+	@echo "... src/policy_runtime.i"
+	@echo "... src/policy_runtime.s"
 	@echo "... src/step_b.o"
 	@echo "... src/step_b.i"
 	@echo "... src/step_b.s"

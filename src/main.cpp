@@ -1,32 +1,30 @@
 #include <iostream>
 
-#include "dcas_policy_engine/step_b.hpp"
-#include "dcas_policy_engine/step_c.hpp"
-#include "dcas_policy_engine/types.hpp"
+#include "dcas_policy_engine/policy_runtime.hpp"
 
 int main() {
-    dcas::StepBInput b_in{};
-    b_in.current_state = dcas::DriverState::WARNING;
-    b_in.is_attentive = false;
-    b_in.reason = dcas::Reason::UNRESPONSIVE;
-    b_in.inattentive_elapsed_s = 2.5;
+    dcas::PolicyRuntime runtime{};
 
-    const dcas::StepBOutput b_out = dcas::evaluate_step_b(b_in);
+    dcas::RuntimeTickInput tick{};
+    tick.step_b.perception.is_attentive = false;
+    tick.step_b.perception.is_attentive_ts_ms = 1000;
+    tick.step_b.perception.reason = dcas::Reason::DROWSY;
+    tick.step_b.perception.reason_ts_ms = 1000;
+    tick.step_b.ego_speed_mps = 15.0;
+    tick.step_b.delta_s = 2.5;
 
-    dcas::StepCInput c_in{};
-    c_in.driver_state = b_out.next_state;
-    c_in.reason = b_out.reason_used;
-    c_in.lkas_throttle = 0.5;
-    c_in.driver_override_lock_latched = false;
+    tick.step_c.previous_lkas_mode = dcas::LkasMode::ON_ACTIVE;
+    tick.step_c.lkas_switch_event = dcas::LkasSwitchEvent::NONE;
+    tick.step_c.notebook_input_alive = true;
+    tick.step_c.driver_override = false;
+    tick.step_c.lkas_throttle = 0.5;
 
-    const dcas::StepCOutput c_out = dcas::evaluate_step_c(c_in);
+    const dcas::RuntimeTickOutput output = runtime.Tick(tick);
 
-    std::cout << "StepB next_state: " << dcas::to_string(b_out.next_state) << "\n";
-    std::cout << "StepB reason_used: " << dcas::to_string(b_out.reason_used) << "\n";
-    std::cout << "StepC hmi_action: " << dcas::to_string(c_out.hmi_action) << "\n";
-    std::cout << "StepC throttle_limit: " << c_out.throttle_limit << "\n";
-    std::cout << "StepC mrm_active: " << (c_out.mrm_active ? "true" : "false") << "\n";
-    std::cout << "StepC driver_override_lock: " << (c_out.driver_override_lock ? "true" : "false") << "\n";
-
+    std::cout << "StepB next_state: " << dcas::to_string(output.step_b.next_state) << "\n";
+    std::cout << "StepB reason: " << dcas::to_string(output.step_b.reason) << "\n";
+    std::cout << "StepC hmi_action: " << dcas::to_string(output.step_c.hmi_action) << "\n";
+    std::cout << "StepC next_lkas_mode: " << dcas::to_string(output.step_c.next_lkas_mode) << "\n";
+    std::cout << "StepC throttle_limit: " << output.step_c.throttle_limit << "\n";
     return 0;
 }

@@ -85,12 +85,12 @@ clean: CMakeFiles/dcas_policy_tests.dir/clean
 CMakeFiles/dcas_policy_engine.dir/all:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/dcas_policy_engine.dir/build.make CMakeFiles/dcas_policy_engine.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/dcas_policy_engine.dir/build.make CMakeFiles/dcas_policy_engine.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/leo/ads-skynet/DCAS-PolicyEngine/build/CMakeFiles --progress-num=1,2,3 "Built target dcas_policy_engine"
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/leo/ads-skynet/DCAS-PolicyEngine/build/CMakeFiles --progress-num=1,2,3,4 "Built target dcas_policy_engine"
 .PHONY : CMakeFiles/dcas_policy_engine.dir/all
 
 # Build rule for subdir invocation for target.
 CMakeFiles/dcas_policy_engine.dir/rule: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/leo/ads-skynet/DCAS-PolicyEngine/build/CMakeFiles 3
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/leo/ads-skynet/DCAS-PolicyEngine/build/CMakeFiles 4
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/dcas_policy_engine.dir/all
 	$(CMAKE_COMMAND) -E cmake_progress_start /home/leo/ads-skynet/DCAS-PolicyEngine/build/CMakeFiles 0
 .PHONY : CMakeFiles/dcas_policy_engine.dir/rule
@@ -111,12 +111,12 @@ CMakeFiles/dcas_policy_engine.dir/clean:
 CMakeFiles/dcas_policy_runner.dir/all: CMakeFiles/dcas_policy_engine.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/dcas_policy_runner.dir/build.make CMakeFiles/dcas_policy_runner.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/dcas_policy_runner.dir/build.make CMakeFiles/dcas_policy_runner.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/leo/ads-skynet/DCAS-PolicyEngine/build/CMakeFiles --progress-num=4,5 "Built target dcas_policy_runner"
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/leo/ads-skynet/DCAS-PolicyEngine/build/CMakeFiles --progress-num=5,6 "Built target dcas_policy_runner"
 .PHONY : CMakeFiles/dcas_policy_runner.dir/all
 
 # Build rule for subdir invocation for target.
 CMakeFiles/dcas_policy_runner.dir/rule: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/leo/ads-skynet/DCAS-PolicyEngine/build/CMakeFiles 5
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/leo/ads-skynet/DCAS-PolicyEngine/build/CMakeFiles 6
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/dcas_policy_runner.dir/all
 	$(CMAKE_COMMAND) -E cmake_progress_start /home/leo/ads-skynet/DCAS-PolicyEngine/build/CMakeFiles 0
 .PHONY : CMakeFiles/dcas_policy_runner.dir/rule
@@ -137,12 +137,12 @@ CMakeFiles/dcas_policy_runner.dir/clean:
 CMakeFiles/dcas_policy_tests.dir/all: CMakeFiles/dcas_policy_engine.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/dcas_policy_tests.dir/build.make CMakeFiles/dcas_policy_tests.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/dcas_policy_tests.dir/build.make CMakeFiles/dcas_policy_tests.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/leo/ads-skynet/DCAS-PolicyEngine/build/CMakeFiles --progress-num=6,7 "Built target dcas_policy_tests"
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/leo/ads-skynet/DCAS-PolicyEngine/build/CMakeFiles --progress-num=7,8 "Built target dcas_policy_tests"
 .PHONY : CMakeFiles/dcas_policy_tests.dir/all
 
 # Build rule for subdir invocation for target.
 CMakeFiles/dcas_policy_tests.dir/rule: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/leo/ads-skynet/DCAS-PolicyEngine/build/CMakeFiles 5
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/leo/ads-skynet/DCAS-PolicyEngine/build/CMakeFiles 6
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/dcas_policy_tests.dir/all
 	$(CMAKE_COMMAND) -E cmake_progress_start /home/leo/ads-skynet/DCAS-PolicyEngine/build/CMakeFiles 0
 .PHONY : CMakeFiles/dcas_policy_tests.dir/rule

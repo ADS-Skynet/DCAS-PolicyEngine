@@ -1,4 +1,6 @@
 file(REMOVE_RECURSE
+  "CMakeFiles/dcas_policy_engine.dir/src/policy_runtime.cpp.o"
+  "CMakeFiles/dcas_policy_engine.dir/src/policy_runtime.cpp.o.d"
   "CMakeFiles/dcas_policy_engine.dir/src/step_b.cpp.o"
   "CMakeFiles/dcas_policy_engine.dir/src/step_b.cpp.o.d"
   "CMakeFiles/dcas_policy_engine.dir/src/step_c.cpp.o"

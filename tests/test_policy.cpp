@@ -1,119 +1,142 @@
+#include <cmath>
 #include <cstdlib>
 #include <iostream>
-#include <cmath>
 
-#include "dcas_policy_engine/step_b.hpp"
-#include "dcas_policy_engine/step_c.hpp"
+#include "dcas_policy_engine/policy_runtime.hpp"
 
 namespace {
 
-void expect_true(bool condition, const char* message) {
+void ExpectTrue(bool condition, const char* message) {
     if (!condition) {
         std::cerr << "[FAIL] " << message << "\n";
         std::exit(1);
     }
 }
 
-void expect_near(double actual, double expected, double eps, const char* message) {
-    if (std::fabs(actual - expected) > eps) {
+void ExpectNear(double actual, double expected, double epsilon, const char* message) {
+    if (std::fabs(actual - expected) > epsilon) {
         std::cerr << "[FAIL] " << message << " (actual=" << actual << ", expected=" << expected << ")\n";
         std::exit(1);
     }
 }
 
-void test_step_b_critical_immediate_absent() {
-    dcas::StepBInput input{};
-    input.current_state = dcas::DriverState::OK;
-    input.is_attentive = false;
-    input.reason = dcas::Reason::UNRESPONSIVE;
-    input.inattentive_elapsed_s = 0.1;
+void TestStepBRequiresSameSnapshot() {
+    dcas::PolicyRuntime runtime{};
+    dcas::RuntimeTickInput tick{};
+    tick.step_b.perception.is_attentive = false;
+    tick.step_b.perception.is_attentive_ts_ms = 1000;
+    tick.step_b.perception.reason = dcas::Reason::UNRESPONSIVE;
+    tick.step_b.perception.reason_ts_ms = 1001;
+    tick.step_b.delta_s = 1.0;
 
-    const auto out = dcas::evaluate_step_b(input);
-    expect_true(out.next_state == dcas::DriverState::ABSENT, "StepB critical reason must jump to ABSENT");
-    expect_true(out.absent_latched_run_cycle, "StepB ABSENT must latch run cycle");
+    const auto output = runtime.Tick(tick);
+    ExpectTrue(output.step_b.next_state == dcas::DriverState::OK, "mismatched timestamps must not advance state");
+    ExpectTrue(output.step_b.input_snapshot_ts_ms == 0, "invalid snapshot must not emit snapshot timestamp");
 }
 
-void test_step_b_recover_from_warning_non_critical() {
-    dcas::StepBInput input{};
-    input.current_state = dcas::DriverState::WARNING;
-    input.is_attentive = true;
+void TestStepBCriticalReasonLatchesAbsent() {
+    dcas::PolicyRuntime runtime{};
+    dcas::RuntimeTickInput tick{};
+    tick.step_b.perception.is_attentive = false;
+    tick.step_b.perception.is_attentive_ts_ms = 1000;
+    tick.step_b.perception.reason = dcas::Reason::UNRESPONSIVE;
+    tick.step_b.perception.reason_ts_ms = 1000;
+    tick.step_b.delta_s = 0.1;
+
+    const auto output = runtime.Tick(tick);
+    ExpectTrue(output.step_b.next_state == dcas::DriverState::ABSENT, "critical reason must jump to ABSENT");
+    ExpectTrue(output.step_b.absent_latched_run_cycle, "ABSENT must latch for the run cycle");
+}
+
+void TestStepBRecoversToOkAfterHold() {
+    dcas::PolicyRuntime runtime{};
+    dcas::RuntimeTickInput inattentive{};
+    inattentive.step_b.perception.is_attentive = false;
+    inattentive.step_b.perception.is_attentive_ts_ms = 1000;
+    inattentive.step_b.perception.reason = dcas::Reason::PHONE;
+    inattentive.step_b.perception.reason_ts_ms = 1000;
+    inattentive.step_b.delta_s = 3.5;
+    inattentive.step_b.ego_speed_mps = 1.0;
+    runtime.Tick(inattentive);
+
+    dcas::RuntimeTickInput recover{};
+    recover.step_b.perception.is_attentive = true;
+    recover.step_b.perception.is_attentive_ts_ms = 2000;
+    recover.step_b.perception.reason = dcas::Reason::PHONE;
+    recover.step_b.perception.reason_ts_ms = 2000;
+    recover.step_b.delta_s = 1.3;
+
+    const auto output = runtime.Tick(recover);
+    ExpectTrue(output.step_b.next_state == dcas::DriverState::OK, "recover hold should return state to OK");
+    ExpectTrue(output.step_b.reason == dcas::Reason::NONE, "attentive snapshot must normalize reason to none");
+}
+
+void TestStepCWarningMapsToEor() {
+    dcas::StepCPolicyEngine engine{};
+    dcas::StepCInput input{};
+    input.driver_state = dcas::DriverState::WARNING;
     input.reason = dcas::Reason::PHONE;
-    input.recover_elapsed_s = 1.3;
-    input.t_recover_hold_s = 1.2;
+    input.previous_lkas_mode = dcas::LkasMode::ON_ACTIVE;
+    input.lkas_throttle = 0.8;
 
-    const auto out = dcas::evaluate_step_b(input);
-    expect_true(out.next_state == dcas::DriverState::OK, "StepB should recover to OK when hold is satisfied");
+    const auto output = engine.Evaluate(input);
+    ExpectTrue(output.hmi_action == dcas::HmiAction::EOR, "WARNING must map to EOR");
+    ExpectNear(output.throttle_limit, 0.56, 1e-9, "WARNING should reduce throttle by base gain");
 }
 
-void test_step_b_absent_latch_blocks_recovery() {
-    dcas::StepBInput input{};
-    input.current_state = dcas::DriverState::WARNING;
-    input.is_attentive = true;
-    input.absent_latched_run_cycle = true;
-    input.recover_elapsed_s = 2.0;
+void TestStepCWarningCanClearEorAfter200msConfirmation() {
+    dcas::StepCPolicyEngine engine{};
+    dcas::StepCInput input{};
+    input.driver_state = dcas::DriverState::WARNING;
+    input.reason = dcas::Reason::PHONE;
+    input.previous_lkas_mode = dcas::LkasMode::ON_ACTIVE;
+    input.lkas_throttle = 0.8;
+    input.reengagement_confirmed_200ms = true;
 
-    const auto out = dcas::evaluate_step_b(input);
-    expect_true(out.next_state == dcas::DriverState::ABSENT, "StepB latch should keep ABSENT in same run cycle");
+    const auto output = engine.Evaluate(input);
+    ExpectTrue(output.hmi_action == dcas::HmiAction::INFO, "confirmed reengagement should clear EOR while state is held");
+    ExpectNear(output.throttle_limit, 0.56, 1e-9, "WARNING throttle should remain conservative until state recovers");
 }
 
-void test_step_c_intoxicated_locks_override() {
+void TestStepCNotebookInputAliveOnlyBlocksActivation() {
+    dcas::StepCPolicyEngine engine{};
+    dcas::StepCInput input{};
+    input.driver_state = dcas::DriverState::OK;
+    input.reason = dcas::Reason::NONE;
+    input.previous_lkas_mode = dcas::LkasMode::ON_ACTIVE;
+    input.notebook_input_alive = false;
+    input.lkas_throttle = 0.8;
+
+    const auto output = engine.Evaluate(input);
+    ExpectTrue(output.next_lkas_mode == dcas::LkasMode::ON_INACTIVE, "lost notebook input should block activation, not force OFF");
+    ExpectTrue(output.hmi_action == dcas::HmiAction::INFO, "activation gating alone should not escalate HMI");
+}
+
+void TestStepCAbsentActivatesMrmAndLockoutOnSecondActivation() {
+    dcas::StepCPolicyEngine engine{};
     dcas::StepCInput input{};
     input.driver_state = dcas::DriverState::ABSENT;
-    input.reason = dcas::Reason::INTOXICATED;
-    input.lkas_throttle = 0.6;
-
-    const auto out = dcas::evaluate_step_c(input);
-    expect_true(out.mrm_active, "StepC ABSENT must activate MRM");
-    expect_true(out.driver_override_lock, "StepC intoxicated ABSENT must lock override");
-}
-
-void test_step_c_unresponsive_allows_override() {
-    dcas::StepCInput input{};
-    input.driver_state = dcas::DriverState::ABSENT;
     input.reason = dcas::Reason::UNRESPONSIVE;
+    input.previous_lkas_mode = dcas::LkasMode::ON_ACTIVE;
     input.lkas_throttle = 0.6;
+    input.latched_state.mrm_activation_count_run_cycle = 1;
 
-    const auto out = dcas::evaluate_step_c(input);
-    expect_true(out.mrm_active, "StepC ABSENT must activate MRM");
-    expect_true(!out.driver_override_lock, "StepC unresponsive ABSENT must allow override");
-}
-
-void test_step_c_escalation_drowsy_overlay() {
-    dcas::StepCInput input{};
-    input.driver_state = dcas::DriverState::ESCALATION;
-    input.reason = dcas::Reason::DROWSY;
-    input.lkas_throttle = 1.0;
-
-    const auto out = dcas::evaluate_step_c(input);
-    expect_true(out.hmi_action == dcas::HmiAction::DCA, "StepC ESCALATION should request DCA");
-    expect_near(out.throttle_limit, 0.18, 1e-9, "StepC drowsy overlay should apply 10% more conservative throttle");
-}
-
-void test_step_c_driver_override_turns_off_control_path() {
-    dcas::StepCInput input{};
-    input.driver_state = dcas::DriverState::ESCALATION;
-    input.reason = dcas::Reason::PHONE;
-    input.lkas_throttle = 0.5;
-    input.driver_override = true;
-    input.driver_override_lock_latched = false;
-
-    const auto out = dcas::evaluate_step_c(input);
-    expect_true(out.hmi_action == dcas::HmiAction::INFO, "Driver override should switch to INFO");
-    expect_true(!out.mrm_active, "Driver override should deactivate MRM on unlocked path");
-    expect_true(out.throttle_limit == 0.0, "Driver override should disable control output");
+    const auto output = engine.Evaluate(input);
+    ExpectTrue(output.mrm_active, "ABSENT must activate MRM");
+    ExpectTrue(output.next_latched_state.driver_override_lock, "second MRM activation should lock override");
+    ExpectTrue(output.next_lkas_mode == dcas::LkasMode::OFF, "lockout should force LKAS off");
 }
 
 }  // namespace
 
 int main() {
-    test_step_b_critical_immediate_absent();
-    test_step_b_recover_from_warning_non_critical();
-    test_step_b_absent_latch_blocks_recovery();
-    test_step_c_intoxicated_locks_override();
-    test_step_c_unresponsive_allows_override();
-    test_step_c_escalation_drowsy_overlay();
-    test_step_c_driver_override_turns_off_control_path();
-
-    std::cout << "[PASS] All policy tests passed\n";
+    TestStepBRequiresSameSnapshot();
+    TestStepBCriticalReasonLatchesAbsent();
+    TestStepBRecoversToOkAfterHold();
+    TestStepCWarningMapsToEor();
+    TestStepCWarningCanClearEorAfter200msConfirmation();
+    TestStepCNotebookInputAliveOnlyBlocksActivation();
+    TestStepCAbsentActivatesMrmAndLockoutOnSecondActivation();
+    std::cout << "[PASS] dcas_policy_tests\n";
     return 0;
 }

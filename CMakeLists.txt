@@ -8,6 +8,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(dcas_policy_engine
     src/step_b.cpp
     src/step_c.cpp
+    src/policy_runtime.cpp
 )
 
 target_include_directories(dcas_policy_engine PUBLIC include)

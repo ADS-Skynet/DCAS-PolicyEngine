@@ -56,7 +56,13 @@
 
 - `next_state`
 - `reason` (Step C 전달용 계산 사용 맥락)
+- `absent_latched_run_cycle`
+  - 이번 계산 결과 기준 ABSENT run-cycle 래치 상태
+  - `true`가 되면 같은 run cycle에서는 해제하지 않는다
 - `input_snapshot_ts_ms` (선택): Step B가 이번 계산에 사용한 최신 `is_attentive` 판단 시각
+- `reengagement_confirmed_200ms` (선택)
+  - `recover_elapsed >= 200ms`를 만족한 재참여 확인 신호
+  - 상태 복귀(`OK`)와 별개로 Step C의 EOR 경고 채널 완화에만 사용한다
 
 ### 2.3 band 경계값 정의 (스케일카 기준)
 
@@ -130,6 +136,7 @@
 - `reason`은 Step B에서 **즉시 상향 전이(critical)** 및 Step C 전달용 의미 신호로 사용한다.
 - `reason`은 Step B 타이머(`T_warn/T_esc/T_absent`)를 보정하지 않는다.
 - 즉, 타이머 전이는 `is_attentive` 지속시간과 base 임계값으로만 결정한다.
+- `is_attentive`가 항상 우선 신호이며, critical reason 규칙은 **`is_attentive` 기준 정규화 이후**에만 적용한다.
 
 ### 2.4.1 인지 입력 처리 규칙 (고정)
 
@@ -151,6 +158,17 @@
 5. Step B의 상태 판단 주축은 항상 최신 `is_attentive`이다.
 6. `reason`은 `is_attentive=no`일 때의 부주의 맥락으로만 사용한다.
 7. `is_attentive=yes`이면 `reason=none`으로 정규화한다.
+8. `critical reason`으로 한 번이라도 `ABSENT`가 강제되면 `absent_latched_run_cycle=true`로 유지하고,
+   같은 run cycle에서는 이후 `is_attentive=yes`가 들어와도 복귀 판단에 사용하지 않는다.
+
+타임스탬프 결합 규칙(고정):
+
+- Step B는 `is_attentive_ts_ms == reason_ts_ms`인 **동일 snapshot 쌍**만 유효 입력으로 사용한다.
+- `is_attentive_ts_ms != reason_ts_ms`이면 해당 입력 쌍은 전이 판단에서 제외한다(상태 유지/래치 우선).
+- 유효한 동일 snapshot 쌍에서만 `reason` 정규화와 critical 판정을 수행한다.
+- 유효 snapshot에서 `is_attentive=yes`이면 `reason=none`으로 정규화한다.
+- 유효 snapshot에서 `is_attentive=no`이면 전달된 `reason`을 사용하고, 비정상/누락이면 `unknown`으로 정규화한다.
+- Step C로 전달하는 `reason`은 항상 위 정규화 과정을 거친 값 1개다.
 
 `critical reason` 분류(기준선):
 
@@ -164,13 +182,14 @@
 ### 2.4.2 단일 최신 맥락 입력 규칙
 
 - 인지팀은 매 주기 `reason` 1개만 전송한다.
-- 이전 주기의 reason은 유지하지 않으며, 현재 계산 주기의 `is_attentive`에 대응하는 reason만 유효하다.
+- 이전 주기의 reason은 유지하지 않으며, 현재 계산 주기의 `is_attentive`와 **동일 timestamp**인 reason만 유효하다.
 - 입력된 `reason`이 비정상이거나 누락되면 `unknown`으로 정규화한다.
 - `is_attentive=yes`이면 Step B는 `reason=none`으로 강제 정규화한다.
 - 상태 전이 판정은 `is_attentive/inattentive_elapsed`가 주축이다.
 - 단, `critical reason`이 들어오면 즉시 `ABSENT` 강제 규칙이 타이머 규칙보다 우선한다.
   단, 이는 항상 **현재 계산 주기에서 `is_attentive` 기준으로 정규화된 `reason`** 에 대해서만 적용한다.
 - Step C는 Step B가 실제 계산에 사용한 `reason` 1개만 소비한다.
+- 지연된 이전 주기 reason은 현재 주기에 재사용하지 않는다.
 
 ---
 
@@ -241,20 +260,22 @@
 
 구현 순서(고정, if-else 체인 권장):
 
-1. 현재 계산 주기에서 정규화된 `reason`이 critical reason이면 즉시 `ABSENT`로 상향
-2. `inattentive_elapsed` 기반 상향 전이(`OK->WARNING->ESCALATION->ABSENT`)
-3. `current_state=ABSENT` 또는 `absent_latched_run_cycle=true`이면 상태를 `ABSENT`로 유지
-4. `200ms <= recover_elapsed < T_recover_hold`이면 경고 해제만 허용하고 상태 유지
-5. `recover_elapsed >= T_recover_hold`이면 `OK` 복귀(단, ABSENT 래치가 없는 경우)
-6. (`v1`에서만) stale fail-safe 적용
+1. `current_state=ABSENT` 또는 `absent_latched_run_cycle=true`이면 상태를 `ABSENT`로 유지(입력 복귀 신호 무시)
+2. `is_attentive_ts_ms == reason_ts_ms`인 동일 snapshot만 유효로 채택
+3. 유효 snapshot에서 정규화된 `reason`이 critical reason이면 즉시 `ABSENT`로 상향
+4. `inattentive_elapsed` 기반 상향 전이(`OK->WARNING->ESCALATION->ABSENT`)
+5. `200ms <= recover_elapsed < T_recover_hold`이면 경고 해제만 허용하고 상태 유지
+6. `recover_elapsed >= T_recover_hold`이면 `OK` 복귀(단, ABSENT 래치가 없는 경우)
+7. (`v1`에서만) stale fail-safe 적용
 
 | 현재 상태 | 조건 | 다음 상태 | 맥락별 보정 |
 |---|---|---|---|
+| ABSENT | ANY | ABSENT 유지 | `absent_latched_run_cycle=true`, 같은 run cycle 하향 금지 |
+| ANY | `is_attentive_ts_ms != reason_ts_ms` | 현재 상태 유지 | 동일 timestamp snapshot만 전이 판단에 사용 |
 | ANY | 현재 계산 주기의 `reason`이 critical reason | 즉시 `ABSENT` | 타이머 무관 즉시 상향 + 계산 사용 `reason` 동봉 |
 | OK | `inattentive_elapsed >= T_warn_eff` | WARNING | reason 타이머 보정 없음 |
 | WARNING | `inattentive_elapsed >= T_esc_eff` | ESCALATION | reason 타이머 보정 없음 |
 | ESCALATION | `inattentive_elapsed >= T_absent_eff` | ABSENT | reason 타이머 보정 없음 |
-| ABSENT | ANY | ABSENT 유지 | `absent_latched_run_cycle=true`, 같은 run cycle 하향 금지 |
 | WARNING/ESCALATION | `200ms <= recover_elapsed < T_recover_hold` | 현재 상태 유지 | 재참여 확인(경고 해제 가능), 상태 하향 금지 |
 | WARNING/ESCALATION | `is_attentive=yes` 연속 유지 `>= T_recover_hold` | OK | 비-critical 맥락 경로에서 복귀 허용 |
 | ANY | `input_stale=true` 또는 입력 누락 | stale fail-safe | 맥락 상관없이 최상 유지 |
@@ -263,6 +284,7 @@
 
 - 기본 복귀: `is_attentive=yes` 연속 유지 `>= T_recover_hold`이면 `next_state=OK` (WARNING/ESCALATION 한정)
 - `unresponsive/intoxicated`는 현재 계산 주기에서 critical이면 즉시 `ABSENT`로 상향되므로, 해당 주기에는 WARNING/ESCALATION 복귀 경로를 적용하지 않는다.
+- `critical reason`으로 `ABSENT`에 도달해 래치가 켜진 이후에는, 다음 타임스탬프의 `is_attentive=yes`도 같은 run cycle에서는 복귀에 사용하지 않는다.
 - 단, `ABSENT` 도달 이력이 있으면 같은 run cycle에서는 `OK` 복귀를 금지한다.
 
 ### 6.1 맥락 수신 흐름 (인지팀 주도 VLM)
@@ -271,8 +293,8 @@
 - 노트북은 VLM 결과를 `reason`으로 Step B에 전달한다.
 - Step B는 별도 호출 요청 신호를 보내지 않으며, 최신 `is_attentive`를 기준으로 그 주기에 대응하는 `reason`만 소비한다.
 - 상태 전이는 `is_attentive` 타이머 기반으로 독립 동작하고, `reason`은 `is_attentive=no`일 때만 즉시 상향/Step C 전달에 사용한다.
-- `is_attentive_ts_ms`, `reason_ts_ms`는 전이 판단의 직접 입력이 아니라,
-  인지팀 입력이 현재 논리에 맞게 짝지어 들어오고 있는지 확인하는 진단/로그용 필드로 사용한다.
+- `is_attentive_ts_ms`, `reason_ts_ms`는 **정규화 유효성 판정용 입력**이다.
+- 즉, 두 값이 동일 timestamp snapshot인지 확인한 뒤에만 현재 주기의 `is_attentive/reason` 쌍을 전이 판단에 사용한다.
 
 ### 6.1.1 EOR 해제 및 재참여 확인 기준
 
@@ -293,6 +315,8 @@
   경고 해제와 상태 전이는 분리해서 관리한다.
 - 구체적으로 `recover_elapsed >= 200ms`에서 경고 해제(재참여 confirmed)는 가능하지만,
   `recover_elapsed < T_recover_hold`인 동안 상태는 하향하지 않는다.
+- 구현 권장: 이 구간에서는 Step B가 `reengagement_confirmed_200ms=true`를 출력해,
+  Step C가 EOR 경고 채널만 완화하고 상태는 유지하도록 한다.
 
 ### 6.2 복귀 시 타이머 처리(명시)
 
