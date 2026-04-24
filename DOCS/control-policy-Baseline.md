@@ -38,7 +38,7 @@ Step B 상태(`OK -> WARNING -> ESCALATION -> ABSENT`)를 입력받아,
 - `input_stale`: 센서/파싱 stale (**프로토타입 v0에서는 미사용, 예약 필드**)
 - `driver_override` (optional): 운전자가 비지원 제어(조향/제동/가속)로 직접 인수했는지 여부
 - `lkas_switch_event` (optional): `NONE | ON | OFF`
-- `lkas_mode` (optional): `OFF | ON_INACTIVE | ON_ACTIVE`
+- `previous_lkas_mode`: `OFF | ON_INACTIVE | ON_ACTIVE` (필수, runtime/state-store 복원값)
 - `notebook_input_alive` (optional): 노트북(인지 입력) 수신 유효 여부
 - `reengagement_confirmed_200ms` (optional): Step B가 계산한 200ms 재참여 확인 신호(EOR 완화용)
 - `manoeuvre_type` (optional): `NONE | CURVE_FOLLOW | LANE_CHANGE | TURN | MRM`
@@ -364,18 +364,19 @@ PolicyOutput EvaluatePolicy(
     DriverState driver_state,
     Reason reason,
     float lkas_throttle,
+    bool reengagement_confirmed_200ms,
+    LkasMode previous_lkas_mode,
     bool notebook_input_alive = true,
     bool driver_override = false,
     bool driver_override_lock_latched = false,
     int mrm_activation_count_run_cycle = 0,
     LkasSwitchEvent lkas_switch_event = LkasSwitchEvent::NONE,
-    LkasMode lkas_mode = LkasMode::OFF,
-    ManoeuvreType current_manoeuvre_type = ManoeuvreType::NONE,
-    ReasonContextSource reason_context_source = ReasonContextSource::STEP_B_BRIDGE) {
+    ManoeuvreType current_manoeuvre_type = ManoeuvreType::NONE) {
   const auto [ratio, base_hmi, base_mrm_active] = GetPolicyBase(driver_state);
   auto hmi = base_hmi;
   auto mrm_active = base_mrm_active;
   auto driver_override_lock = driver_override_lock_latched;
+  auto lkas_mode = previous_lkas_mode;
 
   const Reason resolved_reason = NormalizeReason(reason);
   const float overlay_gain = GetReasonOverlayGain(resolved_reason);
@@ -385,6 +386,10 @@ PolicyOutput EvaluatePolicy(
     hmi = HmiAction::MRM;
     mrm_active = true;
     driver_override_lock = driver_override_lock || (resolved_reason == Reason::INTOXICATED);
+  }
+
+  if (driver_state == DriverState::WARNING && reengagement_confirmed_200ms) {
+    hmi = HmiAction::INFO;  // EOR 채널만 완화, 상태는 Step B가 유지
   }
 
   if (lkas_switch_event == LkasSwitchEvent::OFF) {
@@ -419,7 +424,6 @@ PolicyOutput EvaluatePolicy(
       driver_override_lock,
       lkas_mode,
       current_manoeuvre_type,
-      reason_context_source,
       resolved_reason,
       mrm_activation_count_run_cycle);
 }

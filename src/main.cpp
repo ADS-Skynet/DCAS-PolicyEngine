@@ -10,7 +10,7 @@ int main() {
     tick.step_b.perception.is_attentive_ts_ms = 1000;
     tick.step_b.perception.reason = dcas::Reason::DROWSY;
     tick.step_b.perception.reason_ts_ms = 1000;
-    tick.step_b.ego_speed_mps = 15.0;
+    tick.step_b.jetracer_input_0_4 = 0.2;
     tick.step_b.delta_s = 2.5;
 
     tick.step_c.previous_lkas_mode = dcas::LkasMode::ON_ACTIVE;

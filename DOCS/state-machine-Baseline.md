@@ -264,7 +264,7 @@
 2. `is_attentive_ts_ms == reason_ts_ms`인 동일 snapshot만 유효로 채택
 3. 유효 snapshot에서 정규화된 `reason`이 critical reason이면 즉시 `ABSENT`로 상향
 4. `inattentive_elapsed` 기반 상향 전이(`OK->WARNING->ESCALATION->ABSENT`)
-5. `200ms <= recover_elapsed < T_recover_hold`이면 경고 해제만 허용하고 상태 유지
+5. `current_state=WARNING`이고 `200ms <= recover_elapsed < T_recover_hold`이면 EOR 경고 채널 완화만 허용하고 상태 유지
 6. `recover_elapsed >= T_recover_hold`이면 `OK` 복귀(단, ABSENT 래치가 없는 경우)
 7. (`v1`에서만) stale fail-safe 적용
 
@@ -276,7 +276,7 @@
 | OK | `inattentive_elapsed >= T_warn_eff` | WARNING | reason 타이머 보정 없음 |
 | WARNING | `inattentive_elapsed >= T_esc_eff` | ESCALATION | reason 타이머 보정 없음 |
 | ESCALATION | `inattentive_elapsed >= T_absent_eff` | ABSENT | reason 타이머 보정 없음 |
-| WARNING/ESCALATION | `200ms <= recover_elapsed < T_recover_hold` | 현재 상태 유지 | 재참여 확인(경고 해제 가능), 상태 하향 금지 |
+| WARNING | `200ms <= recover_elapsed < T_recover_hold` | WARNING 유지 | 재참여 확인(EOR 완화 가능), 상태 하향 금지 |
 | WARNING/ESCALATION | `is_attentive=yes` 연속 유지 `>= T_recover_hold` | OK | 비-critical 맥락 경로에서 복귀 허용 |
 | ANY | `input_stale=true` 또는 입력 누락 | stale fail-safe | 맥락 상관없이 최상 유지 |
 
@@ -313,7 +313,7 @@
   **재참여가 0.2초 이상 안정적으로 유지되어야 알림을 해제할 수 있다**는 뜻이다.
 - 따라서 이 프로젝트에서는 `recover_elapsed`를 EOR 해제와 상태 복귀의 공통 검증 변수로 사용하되,
   경고 해제와 상태 전이는 분리해서 관리한다.
-- 구체적으로 `recover_elapsed >= 200ms`에서 경고 해제(재참여 confirmed)는 가능하지만,
+- 구체적으로 `current_state=WARNING`이고 `recover_elapsed >= 200ms`에서 EOR 경고 해제(재참여 confirmed)는 가능하지만,
   `recover_elapsed < T_recover_hold`인 동안 상태는 하향하지 않는다.
 - 구현 권장: 이 구간에서는 Step B가 `reengagement_confirmed_200ms=true`를 출력해,
   Step C가 EOR 경고 채널만 완화하고 상태는 유지하도록 한다.
@@ -332,7 +332,7 @@
 - `is_attentive=no`가 들어오면 `recover_elapsed = 0`
 - `is_attentive=yes`가 들어오면 `recover_elapsed`를 누적하고 `inattentive_elapsed`는 유지
 - `current_state == ABSENT` 또는 `absent_latched_run_cycle==true`면 `next_state = ABSENT` 유지
-- `200ms <= recover_elapsed < T_recover_hold`이면 경고 해제만 허용하고 `next_state = current_state`를 유지
+- `current_state==WARNING`이고 `200ms <= recover_elapsed < T_recover_hold`이면 EOR 경고 해제만 허용하고 `next_state = current_state`를 유지
 - `recover_elapsed >= T_recover_hold`가 되면(ABSENT 래치가 없을 때만) `next_state = OK`로 복귀하고 `inattentive_elapsed = 0`, `recover_elapsed = 0`
 
 주의:

@@ -14,7 +14,7 @@ StepBOutput StepBTransitionEngine::Evaluate(const StepBInput& input, StateTimerS
     const NormalizedSnapshot snapshot = adapter_.Normalize(input.perception);
     StepBStateStore state = state_store.Get();
     const Thresholds thresholds = threshold_scheduler_.Schedule(
-        speed_band_estimator_.Estimate(input.ego_speed_mps));
+        speed_band_estimator_.Estimate(input.jetracer_input_0_4));
 
     if (!snapshot.snapshot_valid) {
         return StepBOutput{

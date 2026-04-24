@@ -10,7 +10,7 @@ namespace dcas {
 
 struct StepBInput {
     PerceptionInput perception{};
-    double ego_speed_mps{0.0};
+    double jetracer_input_0_4{0.0};
     double delta_s{0.0};
     bool stale_fail_safe_enabled{false};
 };

@@ -56,7 +56,7 @@ void TestStepBRecoversToOkAfterHold() {
     inattentive.step_b.perception.reason = dcas::Reason::PHONE;
     inattentive.step_b.perception.reason_ts_ms = 1000;
     inattentive.step_b.delta_s = 3.5;
-    inattentive.step_b.ego_speed_mps = 1.0;
+    inattentive.step_b.jetracer_input_0_4 = 0.1;
     runtime.Tick(inattentive);
 
     dcas::RuntimeTickInput recover{};

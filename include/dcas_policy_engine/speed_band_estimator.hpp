@@ -6,11 +6,14 @@ namespace dcas {
 
 class SpeedBandEstimator {
 public:
-    SpeedBand Estimate(double ego_speed_mps) const {
-        if (ego_speed_mps < 8.33) {
+    SpeedBand Estimate(double jetracer_input_0_4) const {
+        const double clamped = jetracer_input_0_4 < 0.0 ? 0.0 : (jetracer_input_0_4 > 0.4 ? 0.4 : jetracer_input_0_4);
+        const double rho_v = clamped / 0.4;
+
+        if (rho_v < 0.30) {
             return SpeedBand::LOW;
         }
-        if (ego_speed_mps < 22.22) {
+        if (rho_v < 0.65) {
             return SpeedBand::MID;
         }
         return SpeedBand::HIGH;
